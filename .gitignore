@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+palmpay.db
+.env
+data/demo_output/
+data/dataset/

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}PalmPay — User Palm Enrollment{% endblock %}
+
+{% block content %}
+<div class="header-section" style="margin-bottom: 1.5rem;">
+    <h1>User Palm Enrollment</h1>
+    <p class="subtitle">Enroll {{ required_samples }} palm samples to generate a standardized {{ config.FEATURE_VECTOR_DIM if config else '944' }}-D biometric template.</p>
+</div>
+
+<div class="grid-2">
+    <!-- Left Column: Live Camera & Hand Alignment -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>Camera Alignment</h2>
+                <span id="camera-status-pill" class="status-pill neutral">Camera Initializing...</span>
+            </div>
+
+            <div class="camera-box" id="camera-container">
+                <video id="webcam-video" autoplay playsinline muted></video>
+                <canvas id="camera-canvas" class="overlay"></canvas>
+                <div id="camera-guide" class="camera-guide">
+                    Position your open palm inside this region facing the camera
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 0.75rem; margin-top: 1rem;">
+                <button id="btn-start-camera" class="btn btn-secondary" style="flex: 1;">📷 Start Camera</button>
+                <button id="btn-capture-sample" class="btn" style="flex: 2;" disabled>✋ Capture Sample (<span id="sample-counter-btn">0</span>/{{ required_samples }})</button>
+            </div>
+            <p id="live-feedback-text" style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem; text-align: center;">
+                Click "Start Camera" and allow browser webcam permissions.
+            </p>
+        </div>
+    </div>
+
+    <!-- Right Column: User Details & Progressive Sample Captures -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>User Identity</h2>
+            </div>
+
+            <div class="form-group">
+                <label for="input-name">Full Name <span style="color: var(--danger);">*</span></label>
+                <input type="text" id="input-name" placeholder="e.g. Alex Johnson" required autocomplete="off">
+            </div>
+
+            <div class="form-group">
+                <label for="input-usn">USN / Student ID <span style="color: var(--danger);">*</span></label>
+                <input type="text" id="input-usn" placeholder="e.g. 1MS21CS042" required autocomplete="off">
+            </div>
+
+            <div style="margin-top: 1.5rem; margin-bottom: 0.5rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <label style="margin-bottom: 0;">Captured Biometric Samples</label>
+                    <span id="progress-text" style="font-size: 0.85rem; color: var(--text-muted);">0 of {{ required_samples }} captured</span>
+                </div>
+                <div class="progress-bar-wrap">
+                    <div id="progress-bar" class="progress-bar-fill" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Sample Thumbnail Preview Slots -->
+            <div class="sample-grid" id="sample-slots-container">
+                {% for i in range(required_samples) %}
+                <div class="sample-slot" id="slot-{{ i }}">
+                    <span style="font-size: 1.25rem; color: var(--text-dim);">✋</span>
+                    <span class="slot-label">Sample {{ i + 1 }}</span>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div style="display: flex; gap: 0.75rem; margin-top: 1.5rem;">
+                <button id="btn-reset-samples" class="btn btn-secondary" style="flex: 1;" disabled>Clear Samples</button>
+                <button id="btn-submit-enrollment" class="btn" style="flex: 2;" disabled>Save Enrollment</button>
+            </div>
+
+            <div id="enrollment-result-box" style="margin-top: 1rem; display: none;"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/camera.js') }}"></script>
+<script src="{{ url_for('static', filename='js/enroll.js') }}"></script>
+{% endblock %}

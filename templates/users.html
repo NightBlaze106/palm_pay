@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}PalmPay — Enrolled Users Manager{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+    <div>
+        <h1>Enrolled Users & Biometric Templates</h1>
+        <p class="subtitle" style="margin-bottom: 0;">Local SQLite storage repository for enrolled palm biometric templates.</p>
+    </div>
+    <a href="{{ url_for('enroll_page') }}" class="btn">➕ Enroll New User</a>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Enrolled Database ({{ users|length }} Users)</h2>
+        <span class="status-pill neutral">Local SQLite: palmpay.db</span>
+    </div>
+
+    {% if users and users|length > 0 %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Full Name</th>
+                    <th>USN / ID</th>
+                    <th>Biometric Samples</th>
+                    <th>Feature Dimensions</th>
+                    <th>Enrolled Date (UTC)</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in users %}
+                <tr id="user-row-{{ u.id }}">
+                    <td>#{{ u.id }}</td>
+                    <td><strong>{{ u.name }}</strong></td>
+                    <td><code style="background: var(--bg-surface); padding: 0.2rem 0.4rem; border-radius: 4px;">{{ u.usn }}</code></td>
+                    <td><span class="status-pill success" style="font-size: 0.75rem;">{{ u.sample_count }} samples</span></td>
+                    <td>944-D (Float32)</td>
+                    <td style="font-size: 0.85rem; color: var(--text-muted);">{{ u.created_at[:19]|replace('T', ' ') }}</td>
+                    <td>
+                        <button class="btn btn-danger btn-sm" onclick="deleteUser({{ u.id }}, '{{ u.name }}')">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div style="text-align: center; padding: 3rem 1rem;">
+        <div style="font-size: 3rem; margin-bottom: 0.75rem;">📋</div>
+        <h3>No Enrolled Users Yet</h3>
+        <p style="color: var(--text-muted); margin-bottom: 1.5rem;">No biometric templates have been enrolled into the system.</p>
+        <a href="{{ url_for('enroll_page') }}" class="btn">Enroll First User</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function deleteUser(userId, userName) {
+    if (!confirm(`Are you sure you want to delete enrolled user "${userName}" (ID: #${userId}) and all associated biometric templates?`)) {
+        return;
+    }
+
+    try {
+        const resp = await fetch(`/api/users/${userId}/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await resp.json();
+        if (data.success) {
+            const row = document.getElementById(`user-row-${userId}`);
+            if (row) row.remove();
+            window.location.reload();
+        } else {
+            alert(`Failed to delete user: ${data.message}`);
+        }
+    } catch (err) {
+        alert(`Error communicating with server: ${err.message}`);
+    }
+}
+</script>
+{% endblock %}

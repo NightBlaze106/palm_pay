@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}PalmPay — Real-Time Palm Recognition{% endblock %}
+
+{% block content %}
+<div class="header-section" style="margin-bottom: 1.5rem;">
+    <h1>Real-Time Palm Recognition</h1>
+    <p class="subtitle">Continuous 1:N contactless biometric identification against enrolled templates.</p>
+</div>
+
+<div class="grid-2">
+    <!-- Left Column: Live Video Feed & Camera Controls -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>Live Camera Feed</h2>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span id="fps-counter" style="font-size: 0.8rem; color: var(--text-dim); font-family: var(--font-mono);">0 FPS</span>
+                    <span id="recognize-status-pill" class="status-pill neutral">Camera Offline</span>
+                </div>
+            </div>
+
+            <div class="camera-box">
+                <video id="webcam-video" autoplay playsinline muted></video>
+                <canvas id="camera-canvas" class="overlay"></canvas>
+                <div id="camera-guide" class="camera-guide">
+                    Present your palm to authenticate
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 0.75rem; margin-top: 1rem; align-items: center;">
+                <button id="btn-toggle-camera" class="btn btn-secondary" style="flex: 1;">📷 Start Camera</button>
+                <button id="btn-scan-once" class="btn" style="flex: 1;" disabled>⚡ Scan Palm</button>
+                <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--text-muted); cursor: pointer; margin-bottom: 0;">
+                    <input type="checkbox" id="chk-continuous-mode" checked> Live Stream
+                </label>
+            </div>
+        </div>
+
+        <!-- Biometric ROI & Preprocessing Inset -->
+        <div class="card">
+            <div class="card-header">
+                <h3>Live Biometric Extractor Inset</h3>
+                <span class="status-pill neutral" style="font-size: 0.75rem;">128 &times; 128 px</span>
+            </div>
+            <div class="grid-2" style="text-align: center;">
+                <div>
+                    <div style="background: #000; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden; margin-bottom: 0.35rem;">
+                        <img id="img-preview-roi" style="width: 100%; height: 100%; object-fit: cover; display: none;" alt="Raw ROI">
+                        <span id="text-no-roi" style="color: var(--text-dim); font-size: 0.8rem;">Waiting for hand...</span>
+                    </div>
+                    <p style="font-size: 0.75rem; color: var(--text-muted);">1. Extracted Palm ROI</p>
+                </div>
+                <div>
+                    <div style="background: #000; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden; margin-bottom: 0.35rem;">
+                        <img id="img-preview-enhanced" style="width: 100%; height: 100%; object-fit: cover; display: none;" alt="CLAHE Enhanced">
+                        <span id="text-no-enhanced" style="color: var(--text-dim); font-size: 0.8rem;">Waiting for hand...</span>
+                    </div>
+                    <p style="font-size: 0.75rem; color: var(--text-muted);">2. CLAHE Enhanced ROI</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Column: Recognition Result HUD & Latency Breakdown -->
+    <div>
+        <!-- Match Decision Card -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Identification Result</h2>
+                <span style="font-size: 0.85rem; color: var(--text-muted);">Threshold: <strong id="active-threshold-display">{{ "%.2f"|format(threshold) }}</strong></span>
+            </div>
+
+            <div id="match-result-container" class="match-result-card">
+                <div id="match-status-icon" style="font-size: 2.5rem; margin-bottom: 0.5rem;">✋</div>
+                <div id="match-primary-title" class="match-title">Ready for Recognition</div>
+                <div id="match-sub-details" class="match-subtitle">Position your palm in front of the camera to verify identity.</div>
+
+                <div style="margin-top: 1.25rem;">
+                    <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                        <span>Similarity Score</span>
+                        <strong id="score-text-display">0.0000</strong>
+                    </div>
+                    <div class="progress-bar-wrap" style="height: 10px;">
+                        <div id="score-meter-fill" class="progress-bar-fill" style="width: 0%;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Latency / Inference Time Measurements -->
+            <div style="margin-top: 1.25rem; background: var(--bg-surface); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <strong style="font-size: 0.85rem; color: var(--text-muted);">Execution Latency (Measured)</strong>
+                    <span id="latency-total-badge" style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-main);">0.0 ms</span>
+                </div>
+                <div class="grid-2" style="font-size: 0.8rem; color: var(--text-muted);">
+                    <div>Pipeline Extraction: <span id="latency-extraction" style="font-family: var(--font-mono); color: var(--text-main);">0.0 ms</span></div>
+                    <div>1:N Match ({{ user_count }} users): <span id="latency-matching" style="font-family: var(--font-mono); color: var(--text-main);">0.0 ms</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Candidate Similarity Rankings -->
+        <div class="card">
+            <div class="card-header">
+                <h3>Top Candidate Rankings (1:N Search)</h3>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Rank</th>
+                            <th>Enrolled User</th>
+                            <th>USN</th>
+                            <th>Similarity</th>
+                        </tr>
+                    </thead>
+                    <tbody id="candidate-rankings-tbody">
+                        <tr>
+                            <td colspan="4" style="text-align: center; color: var(--text-dim);">No scans executed yet.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/camera.js') }}"></script>
+<script src="{{ url_for('static', filename='js/recognize.js') }}"></script>
+{% endblock %}

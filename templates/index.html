@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+
+{% block title %}PalmPay — Biometric Overview & Architecture{% endblock %}
+
+{% block content %}
+<div class="header-section" style="margin-bottom: 2rem;">
+    <h1>PalmPay Biometric System</h1>
+    <p class="subtitle">Contactless Palm Biometric Authentication using RGB Webcam &bull; 6th-Semester CSE Major Project</p>
+</div>
+
+<!-- System Status Grid -->
+<div class="grid-4" style="margin-bottom: 2rem;">
+    <div class="card" style="margin-bottom: 0;">
+        <p style="font-size: 0.85rem; color: var(--text-dim); text-transform: uppercase; font-weight: 600;">Enrolled Users</p>
+        <h2 style="font-size: 2rem; color: var(--text-main); margin-top: 0.25rem;">{{ stats.total_users }}</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted);">{{ stats.total_templates }} biometric samples</p>
+    </div>
+    <div class="card" style="margin-bottom: 0;">
+        <p style="font-size: 0.85rem; color: var(--text-dim); text-transform: uppercase; font-weight: 600;">Active Model</p>
+        <h2 style="font-size: 1.15rem; color: var(--accent-primary); margin-top: 0.5rem; word-break: break-all;">{{ model_name }}</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted);">MB-uLBP + CLAHE</p>
+    </div>
+    <div class="card" style="margin-bottom: 0;">
+        <p style="font-size: 0.85rem; color: var(--text-dim); text-transform: uppercase; font-weight: 600;">Embedding Space</p>
+        <h2 style="font-size: 2rem; color: var(--text-main); margin-top: 0.25rem;">{{ feature_dim }}</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted);">16 blocks &times; 59 bins (Normalized)</p>
+    </div>
+    <div class="card" style="margin-bottom: 0;">
+        <p style="font-size: 0.85rem; color: var(--text-dim); text-transform: uppercase; font-weight: 600;">Default Threshold</p>
+        <h2 style="font-size: 2rem; color: var(--warning); margin-top: 0.25rem;">{{ "%.2f"|format(threshold) }}</h2>
+        <p style="font-size: 0.85rem; color: var(--text-muted);">Experimental / Tunable</p>
+    </div>
+</div>
+
+<!-- Quick Navigation Banner -->
+<div class="card" style="display: flex; justify-content: space-between; align-items: center; background-color: var(--bg-surface);">
+    <div>
+        <h3 style="margin-bottom: 0.25rem;">Quick Start Demonstration</h3>
+        <p style="color: var(--text-muted); font-size: 0.9rem;">Enroll palm samples or test real-time 1:N contactless recognition with your webcam.</p>
+    </div>
+    <div style="display: flex; gap: 0.75rem;">
+        <a href="{{ url_for('enroll_page') }}" class="btn">✋ Enroll Palm</a>
+        <a href="{{ url_for('recognize_page') }}" class="btn btn-secondary">🔍 Start Recognition</a>
+        <a href="{{ url_for('test_page') }}" class="btn btn-secondary">📊 Evaluation Suite</a>
+    </div>
+</div>
+
+<!-- Biometric Pipeline Architecture -->
+<div class="card">
+    <div class="card-header">
+        <h2>Biometric Processing Pipeline</h2>
+        <span class="status-pill neutral">Modular Architecture</span>
+    </div>
+    <p style="color: var(--text-muted); margin-bottom: 1.25rem; font-size: 0.95rem;">
+        The system transforms standard 2D RGB webcam frames through a multi-stage biometric pipeline without requiring specialized infrared hardware:
+    </p>
+
+    <div class="grid-3" style="margin-bottom: 1rem;">
+        <div style="background: var(--bg-surface); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 700; color: var(--accent-primary); margin-bottom: 0.35rem;">1. Hand & Landmark Detection</div>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">MediaPipe Hands tracks 21 3D landmarks in real time on CPU. Extracts wrist (0), index MCP (5), middle MCP (9), and pinky MCP (17).</p>
+        </div>
+        <div style="background: var(--bg-surface); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 700; color: var(--accent-primary); margin-bottom: 0.35rem;">2. Landmark-Guided Palm ROI</div>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">Calculates palm center and wrist-to-middle MCP vector. Applies affine transformation to crop a rotation-normalized 128&times;128 px square palm ROI.</p>
+        </div>
+        <div style="background: var(--bg-surface); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 700; color: var(--accent-primary); margin-bottom: 0.35rem;">3. CLAHE Contrast Enhancement</div>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">Converts ROI to grayscale and applies Contrast-Limited Adaptive Histogram Equalization (CLAHE) to expose epidermal creases and principal lines.</p>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div style="background: var(--bg-surface); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 700; color: var(--success); margin-bottom: 0.35rem;">4. Multi-Block Uniform LBP (MB-uLBP)</div>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">Divides 128&times;128 ROI into a 4&times;4 spatial grid. Extracts 59-bin uniform LBP histograms per block ($LBP_{8,1}^{u2}$) concatenated into a 944-D unit-normalized feature vector.</p>
+        </div>
+        <div style="background: var(--bg-surface); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+            <div style="font-weight: 700; color: var(--success); margin-bottom: 0.35rem;">5. 1:N Cosine Similarity Matching</div>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">Computes cosine similarity against enrolled templates in SQLite: $\text{Sim}(\mathbf{q}, \mathbf{t}) = \mathbf{q} \cdot \mathbf{t}$. Applies configurable threshold to verify identity.</p>
+        </div>
+    </div>
+</div>
+
+<!-- Literature Survey & Research Basis Table -->
+<div class="card">
+    <div class="card-header">
+        <h2>Research Basis & Scientific Literature Survey</h2>
+        <span class="status-pill neutral">Theoretical Grounding</span>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Paper / Reference</th>
+                    <th>Core Contribution</th>
+                    <th>Application in PalmPay</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Zhang et al. (2003)</strong><br><span style="font-size: 0.8rem; color: var(--text-dim);">IEEE TPAMI</span></td>
+                    <td>Foundational principles of 2D palmprint biometric representation and principal lines isolation.</td>
+                    <td>Validates the distinctiveness of palmprint epidermal creases as a biometric identifier.</td>
+                </tr>
+                <tr>
+                    <td><strong>Ojala et al. (2002)</strong><br><span style="font-size: 0.8rem; color: var(--text-dim);">IEEE TPAMI</span></td>
+                    <td>Multiresolution gray-scale and rotation-invariant texture classification with uniform LBP ($LBP_{P, R}^{u2}$).</td>
+                    <td>Basis for the 59-bin uniform pattern mapping and spatial histogram feature representation.</td>
+                </tr>
+                <tr>
+                    <td><strong>Amrouni et al. (2022)</strong><br><span style="font-size: 0.8rem; color: var(--text-dim);">Biometric Systems</span></td>
+                    <td>Contactless palmprint preprocessing and CLAHE local contrast enhancement under ambient lighting.</td>
+                    <td>Direct basis for applying CLAHE locally on the isolated palm ROI to enhance crease contrast.</td>
+                </tr>
+                <tr>
+                    <td><strong>Zhang et al. (2020)</strong><br><span style="font-size: 0.8rem; color: var(--text-dim);">MediaPipe Hands</span></td>
+                    <td>Real-time 21 3D hand landmark estimation on commodity mobile/laptop CPUs using single RGB frames.</td>
+                    <td>Provides hand detection and palm knuckle / wrist anchor landmark extraction.</td>
+                </tr>
+                <tr>
+                    <td><strong>S&aacute;nchez-Brizuela et al. (2023)</strong><br><span style="font-size: 0.8rem; color: var(--text-dim);">Sensors</span></td>
+                    <td>Landmark-based geometric normalization for contactless hand/palm biometric ROI extraction.</td>
+                    <td>Basis for computing orientation vector ($\vec{v}_{0 \to 9}$) and affine warping for scale/rotation invariance.</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

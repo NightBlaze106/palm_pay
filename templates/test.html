@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}PalmPay — Biometric Evaluation & Threshold Calibration{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+    <div>
+        <h1>Biometric Evaluation & Calibration</h1>
+        <p class="subtitle" style="margin-bottom: 0;">Empirical verification across genuine and impostor comparison pairs.</p>
+    </div>
+    <div style="display: flex; gap: 0.75rem;">
+        <button id="btn-run-eval" class="btn">🚀 Run Evaluation</button>
+        <a id="btn-download-csv" href="/api/export_csv" class="btn btn-secondary">📥 Export CSV</a>
+    </div>
+</div>
+
+<!-- Evaluation Status & Threshold Calibration Widget -->
+<div class="grid-2" style="margin-bottom: 1.5rem;">
+    <div class="card" style="margin-bottom: 0;">
+        <div class="card-header">
+            <h2>Threshold Calibration</h2>
+            <span id="current-threshold-badge" class="status-pill warning">Active: {{ "%.2f"|format(threshold) }}</span>
+        </div>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+            Adjust the decision boundary threshold for 1:N biometric recognition.
+        </p>
+
+        <div class="form-group">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.35rem;">
+                <label for="threshold-slider" style="margin-bottom: 0;">Recognition Threshold (T)</label>
+                <strong id="slider-val-display" style="font-family: var(--font-mono); color: var(--warning);">{{ "%.2f"|format(threshold) }}</strong>
+            </div>
+            <input type="range" id="threshold-slider" min="0.00" max="1.00" step="0.01" value="{{ threshold }}" style="width: 100%; cursor: pointer;">
+        </div>
+
+        <div style="display: flex; gap: 0.75rem; align-items: center;">
+            <button id="btn-apply-threshold" class="btn btn-sm" style="flex: 1;">Apply Threshold</button>
+            <button id="btn-use-suggested" class="btn btn-secondary btn-sm" style="flex: 1;" disabled>Use Suggested EER</button>
+        </div>
+        <div id="threshold-feedback-msg" style="font-size: 0.8rem; margin-top: 0.5rem; color: var(--text-dim); text-align: center;"></div>
+    </div>
+
+    <div class="card" style="margin-bottom: 0;">
+        <div class="card-header">
+            <h2>Dataset Statistics</h2>
+            <span class="status-pill neutral">Empirical Dataset</span>
+        </div>
+        <div class="grid-2" style="margin-bottom: 0.5rem;">
+            <div>
+                <p style="font-size: 0.8rem; color: var(--text-dim);">Enrolled Subjects</p>
+                <h3 id="stat-subjects" style="font-size: 1.5rem;">{{ stats.total_users }}</h3>
+            </div>
+            <div>
+                <p style="font-size: 0.8rem; color: var(--text-dim);">Total Samples</p>
+                <h3 id="stat-samples" style="font-size: 1.5rem;">{{ stats.total_templates }}</h3>
+            </div>
+            <div>
+                <p style="font-size: 0.8rem; color: var(--text-dim);">Genuine Pairs</p>
+                <h3 id="stat-genuine-pairs" style="font-size: 1.5rem; color: var(--accent-primary);">-</h3>
+            </div>
+            <div>
+                <p style="font-size: 0.8rem; color: var(--text-dim);">Impostor Pairs</p>
+                <h3 id="stat-impostor-pairs" style="font-size: 1.5rem; color: var(--danger);">-</h3>
+            </div>
+        </div>
+        <p id="eval-prompt-text" style="font-size: 0.8rem; color: var(--text-dim);">Click "Run Evaluation" to calculate genuine & impostor matrices.</p>
+    </div>
+</div>
+
+<!-- Score Distribution Metrics -->
+<div class="card" id="distribution-card" style="display: none;">
+    <div class="card-header">
+        <h2>Empirical Score Distributions</h2>
+        <span class="status-pill success">Computed on Samples</span>
+    </div>
+    <div class="grid-2">
+        <div style="background: var(--bg-surface); padding: 1.25rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+            <h3 style="color: var(--accent-primary); margin-bottom: 0.5rem;">Genuine Similarity (Same Subject)</h3>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;">Intra-class comparisons between different palm captures of the same user.</p>
+            <div class="grid-2" style="font-size: 0.85rem;">
+                <div>Mean: <strong id="gen-mean" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+                <div>Std Dev: <strong id="gen-std" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+                <div>Min: <strong id="gen-min" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+                <div>Max: <strong id="gen-max" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+            </div>
+        </div>
+
+        <div style="background: var(--bg-surface); padding: 1.25rem; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+            <h3 style="color: var(--danger); margin-bottom: 0.5rem;">Impostor Similarity (Different Subjects)</h3>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;">Inter-class comparisons between palm captures of different users.</p>
+            <div class="grid-2" style="font-size: 0.85rem;">
+                <div>Mean: <strong id="imp-mean" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+                <div>Std Dev: <strong id="imp-std" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+                <div>Min: <strong id="imp-min" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+                <div>Max: <strong id="imp-max" style="font-family: var(--font-mono); color: var(--text-main);">-</strong></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Threshold Sweep Table -->
+<div class="card" id="sweep-card" style="display: none;">
+    <div class="card-header">
+        <h2>Threshold Sweep Matrix (FAR / FRR / GAR)</h2>
+        <span id="eer-badge" class="status-pill neutral">EER: -</span>
+    </div>
+    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+        Performance curves computed by evaluating classification decisions across all sample pairs at intervals of &Delta;T = 0.02.
+    </p>
+
+    <div class="table-wrap" style="max-height: 400px; overflow-y: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Threshold (T)</th>
+                    <th>GAR (Genuine Accept)</th>
+                    <th>FRR (False Reject)</th>
+                    <th>FAR (False Accept)</th>
+                    <th>Overall Accuracy</th>
+                    <th>Gen. Accept</th>
+                    <th>False Reject</th>
+                    <th>False Accept</th>
+                    <th>True Reject</th>
+                </tr>
+            </thead>
+            <tbody id="sweep-tbody">
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/test.js') }}"></script>
+{% endblock %}

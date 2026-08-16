@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}PalmPay — Contactless Palm Biometrics{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header class="navbar">
+        <a href="{{ url_for('index') }}" class="brand">
+            <div class="brand-icon">✋</div>
+            <span class="brand-title">PalmPay</span>
+            <span class="brand-tag">Phase-1 Prototype</span>
+        </a>
+        <nav>
+            <ul class="nav-links">
+                <li><a href="{{ url_for('index') }}" class="nav-link {% if request.path == '/' %}active{% endif %}">Overview</a></li>
+                <li><a href="{{ url_for('enroll_page') }}" class="nav-link {% if request.path == '/enroll' %}active{% endif %}">Enrollment</a></li>
+                <li><a href="{{ url_for('recognize_page') }}" class="nav-link {% if request.path == '/recognize' %}active{% endif %}">Recognition</a></li>
+                <li><a href="{{ url_for('users_page') }}" class="nav-link {% if request.path == '/users' %}active{% endif %}">Enrolled Users</a></li>
+                <li><a href="{{ url_for('test_page') }}" class="nav-link {% if request.path == '/test' %}active{% endif %}">Evaluation & Test</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <p><strong>PalmPay (Phase 1)</strong> — 6th Semester CSE Major Project &bull; Contactless Palm Biometrics using RGB Camera &bull; Intel i3 / Windows Target</p>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
