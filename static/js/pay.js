@@ -208,7 +208,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 setDetectStatus('PALM FOUND', true);
                 showRoiThumb(data.preview_roi_b64);
                 camera.drawPolygon(data.roi_polygon, '#10b981', 3);
-                attemptPayment(camera.captureFrameAsBase64(0.92));
+                attemptPayment();
             } else {
                 setDetectStatus('WAITING FOR CUSTOMER', false);
                 camera.clearCanvas();
@@ -221,9 +221,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Fully automatic: recognize → pay → render outcome. Nobody presses anything.
-    async function attemptPayment(frameB64) {
-        if (processing || !frameB64) return;
+    // Fully automatic: burst-capture → recognize → pay → render outcome.
+    // Nobody presses anything.
+    async function attemptPayment() {
+        if (processing) return;
         processing = true;
         stopProbing();                       // one attempt at a time
         setDetectStatus('PROCESSING…', true);
@@ -231,11 +232,30 @@ document.addEventListener('DOMContentLoaded', () => {
         setStatusLine('<span class="pulse-dot"></span> Verifying palm…');
 
         try {
+            // 0) Burst capture: several frames ~fusionIntervalMs apart so the
+            //    server can fuse them and require frame agreement.
+            const burst = [];
+            const windowN = Math.max(1, cfg.fusionWindow || 4);
+            const intervalMs = Math.max(80, cfg.fusionIntervalMs || 220);
+            for (let i = 0; i < windowN; i++) {
+                const f = camera.captureFrameAsBase64(0.9);
+                if (f) burst.push(f);
+                if (i < windowN - 1) {
+                    await new Promise(r => setTimeout(r, intervalMs));
+                    if (!camera.isActive) break;
+                }
+            }
+            if (!burst.length) {
+                showAuthFail('Could not capture palm frames.');
+                scheduleRetry();
+                return;
+            }
+
             // 1) Biometric recognition (server opens the biometric session on match)
             const recResp = await fetch('/api/recognize', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: frameB64 })
+                body: JSON.stringify({ images: burst })
             });
             const rec = await recResp.json();
 
@@ -243,12 +263,17 @@ document.addEventListener('DOMContentLoaded', () => {
             el.scoreFill.style.width = `${scorePct}%`;
             el.scoreText.textContent =
                 rec.success && rec.recognized
-                    ? `Score ${(rec.similarity_score || 0).toFixed(4)} ✓`
-                    : `Score ${(rec.similarity_score || 0).toFixed(4)} — below threshold`;
+                    ? `Score ${(rec.similarity_score || 0).toFixed(4)} · Frames ${rec.frames_above_threshold ?? '?'}/${rec.frames_quality_passed ?? windowN} ✓`
+                    : `Score ${(rec.similarity_score || 0).toFixed(4)} — not verified`;
 
             // 2) Not recognized → no transaction; keep scanning for the next attempt.
             if (!rec.success || !rec.recognized) {
-                showAuthFail(rec.message || 'Palm did not match any enrolled account.');
+                const unstable = rec.match_reason === 'unstable_capture';
+                showAuthFail(
+                    unstable
+                        ? 'Capture unstable — hold palm steady and try again'
+                        : (rec.message || 'Palm did not match any enrolled account.')
+                );
                 scheduleRetry();
                 return;
             }

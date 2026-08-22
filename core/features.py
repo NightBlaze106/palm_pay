@@ -1,7 +1,8 @@
 """
-Feature Extraction Module using Multi-Block Uniform Local Binary Patterns (MB-uLBP).
-Computes 59-bin uniform LBP histograms across a 4x4 spatial block grid to generate
-a 944-dimensional normalized palm feature vector.
+Feature Extraction Module using Multi-Block Multi-Scale Uniform Local Binary
+Patterns (MB-uLBP, radii R=1 and R=2). Computes 59-bin uniform LBP histograms
+across a 4x4 spatial block grid per scale and concatenates them into the final
+L2-normalized palm feature vector.
 
 Scientific References:
 - Ojala, T., Pietikäinen, M., & Mäenpää, T. (2002). Multiresolution gray-scale and rotation
@@ -52,8 +53,10 @@ class UniformLBPTable:
 
 class MBuLBPFeatureExtractor:
     """
-    Multi-Block Uniform Local Binary Patterns (MB-uLBP) feature extractor.
-    Generates a 944-dimensional L2-normalized feature vector from an enhanced palm ROI.
+    Multi-Block Multi-Scale Uniform Local Binary Patterns feature extractor.
+    Concatenates uniform-LBP block histograms across multiple radii
+    (config.LBP_RADII, e.g. R=1 fine texture + R=2 contextual texture) to
+    generate the final L2-normalized palm feature vector.
     """
 
     def __init__(
@@ -61,37 +64,41 @@ class MBuLBPFeatureExtractor:
         grid_x: int = config.LBP_GRID_X,
         grid_y: int = config.LBP_GRID_Y,
         bins_per_block: int = config.LBP_BINS_PER_BLOCK,
+        radii=config.LBP_RADII,
     ):
         self.grid_x = grid_x
         self.grid_y = grid_y
         self.bins_per_block = bins_per_block
-        self.expected_dim = grid_x * grid_y * bins_per_block
+        self.radii = tuple(radii)
+        self.expected_dim = grid_x * grid_y * bins_per_block * len(self.radii)
         self.lut = UniformLBPTable.get_table()
 
-    def compute_lbp_image(self, gray_image: np.ndarray) -> np.ndarray:
+    def compute_lbp_image(self, gray_image: np.ndarray, radius: int = 1) -> np.ndarray:
         """
-        Computes 8-neighbor (P=8, R=1) LBP image using vectorized numpy slicing.
-        Maps values to 59 uniform pattern indices via lookup table.
+        Computes 8-neighbor (P=8, R=radius) uniform-LBP image using vectorized
+        numpy slicing. Maps values to 59 uniform pattern indices via lookup table.
 
         Args:
             gray_image: 2D grayscale uint8 array (e.g. 128x128).
+            radius: neighbor distance in pixels.
 
         Returns:
-            2D int32 array containing uniform LBP bin indices in [0, 58].
+            2D int32 array of uniform LBP bin indices in [0, 58].
         """
         h, w = gray_image.shape
-        center = gray_image[1 : h - 1, 1 : w - 1]
+        r = radius
+        center = gray_image[r : h - r, r : w - r]
 
-        # 8 neighbors around center (radius = 1)
+        # 8 neighbors at distance r:
         # Top-Left, Top, Top-Right, Right, Bottom-Right, Bottom, Bottom-Left, Left
-        n0 = gray_image[0 : h - 2, 0 : w - 2] >= center  # Bit 0
-        n1 = gray_image[0 : h - 2, 1 : w - 1] >= center  # Bit 1
-        n2 = gray_image[0 : h - 2, 2 : w] >= center      # Bit 2
-        n3 = gray_image[1 : h - 1, 2 : w] >= center      # Bit 3
-        n4 = gray_image[2 : h, 2 : w] >= center          # Bit 4
-        n5 = gray_image[2 : h, 1 : w - 1] >= center      # Bit 5
-        n6 = gray_image[2 : h, 0 : w - 2] >= center      # Bit 6
-        n7 = gray_image[1 : h - 1, 0 : w - 2] >= center  # Bit 7
+        n0 = gray_image[0 : h - 2 * r, 0 : w - 2 * r] >= center      # Bit 0 (TL)
+        n1 = gray_image[0 : h - 2 * r, r : w - r] >= center          # Bit 1 (T)
+        n2 = gray_image[0 : h - 2 * r, 2 * r : w] >= center          # Bit 2 (TR)
+        n3 = gray_image[r : h - r, 2 * r : w] >= center              # Bit 3 (R)
+        n4 = gray_image[2 * r : h, 2 * r : w] >= center              # Bit 4 (BR)
+        n5 = gray_image[2 * r : h, r : w - r] >= center              # Bit 5 (B)
+        n6 = gray_image[2 * r : h, 0 : w - 2 * r] >= center          # Bit 6 (BL)
+        n7 = gray_image[r : h - r, 0 : w - 2 * r] >= center          # Bit 7 (L)
 
         # Pack bits into 8-bit integer [0, 255]
         lbp_code = (
@@ -106,18 +113,20 @@ class MBuLBPFeatureExtractor:
         )
 
         # Map to uniform bins using lookup table
-        uniform_lbp = self.lut[lbp_code]
-        return uniform_lbp
+        return self.lut[lbp_code]
 
     def extract_features(self, enhanced_roi: np.ndarray) -> np.ndarray:
         """
-        Extracts concatenated spatial block histograms from enhanced palm ROI.
+        Extracts concatenated multi-scale spatial block histograms.
+
+        Layout (fixed order): for every 4x4-grid block, append one histogram
+        per radius (R1 then R2). Total dim = blocks(16) x scales(2) x bins(59).
 
         Args:
-            enhanced_roi: 2D CLAHE-enhanced grayscale palm image (128x128 uint8).
+            enhanced_roi: 2D contrast-enhanced grayscale palm image (uint8).
 
         Returns:
-            1D numpy array of shape (944,), float32, L2-normalized to unit length.
+            1D float32 array, L2-normalized to unit length.
         """
         if enhanced_roi is None or enhanced_roi.size == 0:
             return np.zeros(self.expected_dim, dtype=np.float32)
@@ -127,9 +136,9 @@ class MBuLBPFeatureExtractor:
             enhanced_roi = enhanced_roi[:, :, 0]
         enhanced_roi = enhanced_roi.astype(np.uint8)
 
-        # Compute Uniform LBP coded image
-        lbp_image = self.compute_lbp_image(enhanced_roi)
-        h, w = lbp_image.shape
+        # One coded image per radius (computed once)
+        lbp_images = [self.compute_lbp_image(enhanced_roi, radius=r) for r in self.radii]
+        h, w = lbp_images[0].shape
 
         block_h = h // self.grid_y
         block_w = w // self.grid_x
@@ -143,27 +152,24 @@ class MBuLBPFeatureExtractor:
                 x_start = gx * block_w
                 x_end = (gx + 1) * block_w if gx < self.grid_x - 1 else w
 
-                sub_block = lbp_image[y_start:y_end, x_start:x_end]
+                for lbp_img in lbp_images:
+                    sub_block = lbp_img[y_start:y_end, x_start:x_end]
 
-                # Compute 59-bin histogram
-                hist, _ = np.histogram(
-                    sub_block,
-                    bins=self.bins_per_block,
-                    range=(0, self.bins_per_block),
-                )
-                hist = hist.astype(np.float32)
+                    hist, _ = np.histogram(
+                        sub_block,
+                        bins=self.bins_per_block,
+                        range=(0, self.bins_per_block),
+                    )
+                    hist = hist.astype(np.float32)
 
-                # Block-level L2 normalization
-                norm_val = np.linalg.norm(hist)
-                if norm_val > 1e-7:
-                    hist /= norm_val
+                    norm_val = np.linalg.norm(hist)
+                    if norm_val > 1e-7:
+                        hist /= norm_val
 
-                feature_blocks.append(hist)
+                    feature_blocks.append(hist)
 
-        # Concatenate all spatial block histograms
         feature_vector = np.concatenate(feature_blocks).astype(np.float32)
 
-        # Overall global L2 normalization to unit vector
         global_norm = np.linalg.norm(feature_vector)
         if global_norm > 1e-7:
             feature_vector /= global_norm

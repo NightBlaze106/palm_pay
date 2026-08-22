@@ -254,7 +254,12 @@ class Database:
                 }
 
             cursor.execute(
-                "SELECT user_id, sample_index, feature_blob, feature_dim, model_name FROM templates ORDER BY user_id, sample_index ASC"
+                """
+                SELECT user_id, sample_index, feature_blob, feature_dim, model_name FROM templates
+                WHERE feature_dim = ? AND model_name = ?
+                ORDER BY user_id, sample_index ASC
+                """,
+                (config.FEATURE_VECTOR_DIM, config.MODEL_NAME),
             )
             for row in cursor.fetchall():
                 uid = row["user_id"]

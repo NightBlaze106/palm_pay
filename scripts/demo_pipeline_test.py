@@ -1,6 +1,6 @@
 """
 CLI Demonstration Script:
-Validates the full biometric pipeline from frame -> MediaPipe -> Palm ROI -> CLAHE -> 944-D LBP Vector.
+Validates the full biometric pipeline from frame -> MediaPipe -> Palm ROI -> CLAHE -> multi-scale LBP Vector.
 """
 
 import os
@@ -140,7 +140,7 @@ def run_demonstration():
     cv2.imwrite(clahe_path, enhanced)
     print(f"  Saved CLAHE enhanced ROI to: {clahe_path}")
 
-    # 5. Feature Extraction (MB-uLBP 944-D Vector)
+    # 5. Feature Extraction (Multi-Scale MB-uLBP Vector)
     print("\n[Step 5] Extracting Multi-Block Uniform LBP Feature Vector (MB-uLBP)...")
     model = ClassicalPalmModel()
     t0 = time.perf_counter()

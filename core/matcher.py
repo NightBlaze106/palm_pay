@@ -30,6 +30,9 @@ class PalmMatcher:
         """
         if vec_a is None or vec_b is None or len(vec_a) == 0 or len(vec_b) == 0:
             return 0.0
+        if len(vec_a) != len(vec_b):
+            # Dimension mismatch (e.g. template from an older model version).
+            return 0.0
 
         norm_a = np.linalg.norm(vec_a)
         norm_b = np.linalg.norm(vec_b)
@@ -56,6 +59,20 @@ class PalmMatcher:
             mean_vec /= norm
         return mean_vec
 
+    def frame_pass_score(self, query_embedding: np.ndarray, enrolled_users: List[Dict]) -> float:
+        """
+        Best cosine similarity of ONE query frame against ANY enrolled template.
+        Used by multi-frame fusion to count how many frames independently clear
+        the threshold.
+        """
+        best = -1.0
+        for user in enrolled_users:
+            for tmpl in user.get("templates", []):
+                s = self.cosine_similarity(query_embedding, tmpl)
+                if s > best:
+                    best = s
+        return max(best, 0.0)
+
     def match_1_to_n(
         self,
         query_embedding: np.ndarray,
@@ -65,7 +82,7 @@ class PalmMatcher:
         Matches a query palm embedding against all enrolled user templates (1:N search).
 
         Args:
-            query_embedding: 1D normalized feature vector (944,).
+            query_embedding: 1D normalized feature vector (config.FEATURE_VECTOR_DIM,).
             enrolled_users: List of user dicts, each containing:
                 - 'id': user_id
                 - 'name': user name
@@ -88,6 +105,7 @@ class PalmMatcher:
                 "similarity_score": 0.0,
                 "threshold_used": self.threshold,
                 "all_scores": [],
+                "reason": "invalid_query",
                 "message": "Invalid query feature vector.",
             }
 
@@ -98,73 +116,113 @@ class PalmMatcher:
                 "similarity_score": 0.0,
                 "threshold_used": self.threshold,
                 "all_scores": [],
+                "reason": "no_enrolled_users",
                 "message": "No enrolled users in database. Please enroll a user first.",
             }
 
-        best_user = None
-        best_score = -1.0
-        candidate_scores = []
-
+        # ---- Hardened scoring (Accuracy Sprint) ----
+        # For each user compute TWO signals:
+        #   mean_score  — cosine vs the user's normalized MEAN template (robust, primary)
+        #   best_sample — max cosine over individual samples (sanity check)
+        # A candidate only qualifies when BOTH clear the threshold. Ranking uses
+        # the mean score. This removes the old max-of-noisy-scores inflation that
+        # let unregistered palms slip through.
+        candidates = []
         for user in enrolled_users:
             user_templates = user.get("templates", [])
             if not user_templates:
                 continue
 
-            # Compute similarity against each enrolled sample of this user
-            sample_scores = [
-                self.cosine_similarity(query_embedding, tmpl) for tmpl in user_templates
-            ]
-            # Max-score across enrollment samples for the user
-            user_best_score = max(sample_scores) if sample_scores else 0.0
+            mean_template = self.aggregate_templates(user_templates)
+            mean_score = self.cosine_similarity(query_embedding, mean_template)
+            best_sample = max(
+                (self.cosine_similarity(query_embedding, t) for t in user_templates),
+                default=0.0,
+            )
 
-            candidate_scores.append(
+            candidates.append(
                 {
                     "user_id": user["id"],
                     "name": user["name"],
                     "usn": user.get("usn", ""),
-                    "score": round(user_best_score, 4),
+                    "score": round(mean_score, 4),
+                    "best_sample_score": round(best_sample, 4),
+                    "_passes": (mean_score >= self.threshold) and (best_sample >= self.threshold),
                 }
             )
 
-            if user_best_score > best_score:
-                best_score = user_best_score
-                best_user = user
+        if not candidates:
+            return {
+                "recognized": False,
+                "matched_user": None,
+                "similarity_score": 0.0,
+                "threshold_used": self.threshold,
+                "all_scores": [],
+                "reason": "no_valid_templates",
+                "message": "No usable templates found for enrolled users.",
+            }
 
-        # Sort candidates by score descending
-        candidate_scores.sort(key=lambda x: x["score"], reverse=True)
+        # Rank by mean score (tie-break on best sample), descending.
+        candidates.sort(key=lambda c: (c["score"], c["best_sample_score"]), reverse=True)
+        top = candidates[0]
+        second = candidates[1] if len(candidates) > 1 else None
 
-        is_recognized = (best_score >= self.threshold) and (best_user is not None)
+        all_scores = [
+            {"user_id": c["user_id"], "name": c["name"], "usn": c["usn"], "score": c["score"], "best_sample_score": c["best_sample_score"]}
+            for c in candidates
+        ]
 
-        if is_recognized:
-            msg = f"Palm Recognized: {best_user['name']} (Score: {best_score:.4f} >= Threshold: {self.threshold:.2f})"
-        else:
-            if best_user:
-                msg = f"Palm Not Recognized (Best Match: {best_user['name']} with Score: {best_score:.4f} < Threshold: {self.threshold:.2f})"
-            else:
-                msg = "Palm Not Recognized (No matching template)."
+        def _public(c):
+            return {"id": c["user_id"], "name": c["name"], "usn": c["usn"]}
+
+        if not top["_passes"]:
+            return {
+                "recognized": False,
+                "matched_user": None,
+                "best_candidate": _public(top),
+                "similarity_score": round(max(top["score"], 0.0), 4),
+                "threshold_used": self.threshold,
+                "all_scores": all_scores,
+                "reason": "below_threshold",
+                "message": (
+                    f"Palm Not Recognized (Best Match: {top['name']} with Score: "
+                    f"{top['score']:.4f} < Threshold: {self.threshold:.2f})"
+                ),
+            }
+
+        # Ambiguity guard: two qualifying identities within a tiny margin of each
+        # other must NOT resolve to a payment.
+        ambiguous = False
+        if second is not None and second["_passes"]:
+            gap = top["score"] - second["score"]
+            if gap < config.MATCHER_AMBIGUITY_MARGIN:
+                ambiguous = True
+
+        if ambiguous:
+            return {
+                "recognized": False,
+                "matched_user": None,
+                "best_candidate": _public(top),
+                "similarity_score": round(max(top["score"], 0.0), 4),
+                "threshold_used": self.threshold,
+                "all_scores": all_scores,
+                "reason": "ambiguous",
+                "message": (
+                    f"Ambiguous palm — {top['name']} ({top['score']:.4f}) and "
+                    f"{second['name']} ({second['score']:.4f}) are too close to decide."
+                ),
+            }
 
         return {
-            "recognized": is_recognized,
-            "matched_user": (
-                {
-                    "id": best_user["id"],
-                    "name": best_user["name"],
-                    "usn": best_user.get("usn", ""),
-                }
-                if is_recognized
-                else None
-            ),
-            "best_candidate": (
-                {
-                    "id": best_user["id"],
-                    "name": best_user["name"],
-                    "usn": best_user.get("usn", ""),
-                }
-                if best_user
-                else None
-            ),
-            "similarity_score": round(max(best_score, 0.0), 4),
+            "recognized": True,
+            "matched_user": _public(top),
+            "best_candidate": _public(top),
+            "similarity_score": round(max(top["score"], 0.0), 4),
             "threshold_used": self.threshold,
-            "all_scores": candidate_scores,
-            "message": msg,
+            "all_scores": all_scores,
+            "reason": "ok",
+            "message": (
+                f"Palm Recognized: {top['name']} (Mean-Template Score: {top['score']:.4f} "
+                f">= Threshold: {self.threshold:.2f})"
+            ),
         }

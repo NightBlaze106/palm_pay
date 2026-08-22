@@ -5,7 +5,7 @@
 {% block content %}
 <div class="header-section" style="margin-bottom: 1.5rem;">
     <h1>User Palm Enrollment</h1>
-    <p class="subtitle">Enroll {{ required_samples }} palm samples to generate a standardized {{ config.FEATURE_VECTOR_DIM if config else '944' }}-D biometric template.</p>
+    <p class="subtitle">Hold your palm steady — the system automatically captures {{ required_samples }} varied samples, like phone fingerprint setup.</p>
 </div>
 
 <div class="grid-2">
@@ -20,17 +20,16 @@
             <div class="camera-box" id="camera-container">
                 <video id="webcam-video" autoplay playsinline muted></video>
                 <canvas id="camera-canvas" class="overlay"></canvas>
+                <span id="scan-progress-pill" class="status-pill warning" style="position:absolute; top:12px; right:12px; z-index:5; display:none;">0 / {{ required_samples }}</span>
                 <div id="camera-guide" class="camera-guide">
                     Position your open palm inside this region facing the camera
                 </div>
             </div>
 
-            <div style="display: flex; gap: 0.75rem; margin-top: 1rem;">
-                <button id="btn-start-camera" class="btn btn-secondary" style="flex: 1;">📷 Start Camera</button>
-                <button id="btn-capture-sample" class="btn" style="flex: 2;" disabled>✋ Capture Sample (<span id="sample-counter-btn">0</span>/{{ required_samples }})</button>
-            </div>
-            <p id="live-feedback-text" style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem; text-align: center;">
-                Click "Start Camera" and allow browser webcam permissions.
+            <button id="btn-start-scan" class="btn" style="width: 100%; margin-top: 1rem;">🚀 Start Enrollment Scan</button>
+            <button id="btn-cancel-scan" class="btn btn-secondary" style="width: 100%; margin-top: 0.5rem; display: none;">✕ Cancel Scan</button>
+            <p id="live-feedback-text" style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.75rem; text-align: center;">
+                Enter your name and USN, then start the scan.
             </p>
         </div>
     </div>
@@ -72,10 +71,7 @@
                 {% endfor %}
             </div>
 
-            <div style="display: flex; gap: 0.75rem; margin-top: 1.5rem;">
-                <button id="btn-reset-samples" class="btn btn-secondary" style="flex: 1;" disabled>Clear Samples</button>
-                <button id="btn-submit-enrollment" class="btn" style="flex: 2;" disabled>Save Enrollment</button>
-            </div>
+            <button id="btn-reset-samples" class="btn btn-secondary" style="width: 100%; margin-top: 1.5rem;" disabled>Clear Samples</button>
 
             <div id="enrollment-result-box" style="margin-top: 1rem; display: none;"></div>
         </div>
@@ -84,6 +80,15 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+window.PALMPAY_ENROLL = {
+    requiredSamples: {{ required_samples }},
+    minSamples: {{ min_samples }},
+    cooldownMs: {{ cooldown_ms }},
+    posePrompts: {{ pose_prompts|tojson }},
+    duplicateDiffPct: {{ duplicate_diff_pct }}
+};
+</script>
 <script src="{{ url_for('static', filename='js/camera.js') }}"></script>
 <script src="{{ url_for('static', filename='js/enroll.js') }}"></script>
 {% endblock %}

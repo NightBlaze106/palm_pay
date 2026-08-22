@@ -9,6 +9,7 @@ import io
 import os
 import time
 from functools import wraps
+import numpy as np
 from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 
 import config
@@ -110,6 +111,12 @@ def payment_template_helpers():
         # everywhere it is included — standalone /pay AND the embedded merchant tab).
         max_amount=config.MAX_PAYMENT_AMOUNT,
         ttl_seconds=config.BIOMETRIC_SESSION_TTL_SECONDS,
+        fusion_window=config.FUSION_WINDOW,
+        fusion_interval_ms=config.FUSION_CAPTURE_INTERVAL_MS,
+        # Automated enrollment (fingerprint-style scan)
+        cooldown_ms=config.ENROLL_CAPTURE_COOLDOWN_MS,
+        pose_prompts=list(config.ENROLL_POSE_PROMPTS),
+        duplicate_diff_pct=config.ENROLL_DUPLICATE_DIFF_PCT,
     )
 
 
@@ -889,7 +896,7 @@ def api_process_frame():
 def api_enroll():
     """
     Enrolls a new user with 3-5 palm sample frames.
-    Validates identity, extracts 944-D embeddings for all samples, and stores in SQLite.
+    Validates identity, extracts multi-scale LBP embeddings for all samples, and stores in SQLite.
     """
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()
@@ -983,48 +990,120 @@ def api_enroll():
 @app.route("/api/recognize", methods=["POST"])
 def api_recognize():
     """
-    Performs 1:N Biometric Authentication on query frame.
+    Performs 1:N Biometric Authentication.
+
+    Accuracy Sprint — multi-frame fusion:
+      Body may be { image: b64 } (legacy single frame) or
+      { images: [b64, b64, ...] } (POS burst, up to FUSION_WINDOW frames).
+    Decision = hardened mean-template match on the MEAN query embedding AND at
+    least FUSION_MIN_PASS_FRAMES individual frames clearing the threshold.
+    The response contract of the legacy single-frame flow is unchanged; fusion
+    fields are additive.
     """
     start_total = time.perf_counter()
     data = request.get_json(silent=True) or {}
-    image_b64 = data.get("image", "")
 
-    if not image_b64:
+    images_b64 = data.get("images") if isinstance(data.get("images"), list) else []
+    if not images_b64 and data.get("image"):
+        images_b64 = [data.get("image")]
+
+    if not images_b64:
         return jsonify({"success": False, "message": "No query image provided."}), 400
 
-    frame_bgr = pipeline.decode_base64_to_image(image_b64)
-    if frame_bgr is None:
-        return jsonify({"success": False, "message": "Failed to decode query frame."}), 400
+    images_b64 = images_b64[: config.FUSION_WINDOW]
 
-    # Step 1: Run Biometric Extraction Pipeline
-    pipeline_res = pipeline.process_frame(frame_bgr, include_visuals=True)
-    if not pipeline_res["success"] or pipeline_res["embedding"] is None:
-        total_lat = (time.perf_counter() - start_total) * 1000.0
+    # Step 1: Run Biometric Extraction Pipeline per frame.
+    # Frame 0 carries UI previews (legacy behavior); extra frames skip visuals.
+    pipeline_results = []
+    decode_failures = 0
+    for idx, image_b64 in enumerate(images_b64):
+        if not isinstance(image_b64, str) or not image_b64:
+            decode_failures += 1
+            continue
+        frame_bgr = pipeline.decode_base64_to_image(image_b64)
+        if frame_bgr is None:
+            decode_failures += 1
+            continue
+        pipeline_results.append(
+            pipeline.process_frame(frame_bgr, include_visuals=(idx == 0))
+        )
+
+    ok_frames = [
+        r for r in pipeline_results if r["success"] and r["embedding"] is not None
+    ]
+
+    total_lat = (time.perf_counter() - start_total) * 1000.0
+
+    def _failure_response(first_res=None):
+        """Legacy-shaped failure payload for the whole burst."""
+        res = first_res or {}
         return jsonify(
             {
                 "success": False,
                 "recognized": False,
-                "hand_detected": pipeline_res["hand_detected"],
-                "roi_extracted": pipeline_res["roi_extracted"],
+                "hand_detected": bool(res.get("hand_detected")),
+                "roi_extracted": bool(res.get("roi_extracted")),
                 "matched_user": None,
                 "similarity_score": 0.0,
                 "threshold_used": matcher.threshold,
-                "feature_extraction_latency_ms": pipeline_res["latency_ms"],
+                "feature_extraction_latency_ms": sum(r["latency_ms"] for r in pipeline_results),
                 "matching_latency_ms": 0.0,
                 "total_latency_ms": round(total_lat, 2),
-                "preview_roi_b64": pipeline_res["preview_roi_bgr_b64"],
-                "preview_enhanced_b64": pipeline_res["preview_enhanced_b64"],
-                "preview_annotated_b64": pipeline_res["preview_annotated_b64"],
-                "message": pipeline_res["message"],
+                "preview_roi_b64": res.get("preview_roi_bgr_b64", ""),
+                "preview_enhanced_b64": res.get("preview_enhanced_b64", ""),
+                "preview_annotated_b64": res.get("preview_annotated_b64", ""),
+                "frames_received": len(images_b64),
+                "frames_quality_passed": 0,
+                "frames_above_threshold": 0,
+                "message": (
+                    res.get("message")
+                    or ("Failed to decode query frame(s)." if decode_failures else "No usable palm frames.")
+                ),
             }
         )
 
-    # Step 2: 1:N Template Matching against Enrolled Database
+    if not pipeline_results:
+        return _failure_response()
+
+    first_res = pipeline_results[0]
+    if not ok_frames:
+        # Every frame failed (no hand / quality gate). Report the most useful one:
+        quality_fails = [r for r in pipeline_results if r.get("failure_stage") == "quality"]
+        return _failure_response(quality_fails[0] if quality_fails else first_res)
+
+    # Step 2: Fuse embeddings -> normalized MEAN query vector.
+    stacked = np.stack([np.asarray(f["embedding"], dtype=np.float32) for f in ok_frames])
+    mean_query = stacked.mean(axis=0).astype(np.float32)
+    norm = float(np.linalg.norm(mean_query))
+    mean_query = mean_query / norm if norm > 1e-7 else stacked[0]
+
+    # Step 3: Hardened matching on the fused query + per-frame agreement count.
     t_match_start = time.perf_counter()
     enrolled_users = db.get_all_users_with_templates()
-    match_res = matcher.match_1_to_n(pipeline_res["embedding"], enrolled_users)
+    match_res = matcher.match_1_to_n(mean_query, enrolled_users)
+    frames_above = sum(
+        1 for f in ok_frames
+        if matcher.frame_pass_score(f["embedding"], enrolled_users) >= matcher.threshold
+    )
     matching_lat = (time.perf_counter() - t_match_start) * 1000.0
     total_lat = (time.perf_counter() - start_total) * 1000.0
+
+    # Step 4: Fusion gate — identity stands only if enough individual frames
+    # independently clear the threshold. Single-frame requests require 1/1
+    # (identical to legacy behavior).
+    min_frames_required = max(1, min(config.FUSION_MIN_PASS_FRAMES, len(ok_frames)))
+    fusion_ok = frames_above >= min_frames_required
+
+    if match_res["recognized"] and not fusion_ok:
+        match_res["recognized"] = False
+        match_res["matched_user"] = None
+        match_res["reason"] = "unstable_capture"
+        match_res["message"] = (
+            f"Capture unstable — only {frames_above}/{len(ok_frames)} frames matched clearly. "
+            "Hold the palm steady and scan again."
+        )
+
+    extraction_lat = round(sum(r["latency_ms"] for r in pipeline_results), 2)
 
     # Payment system (Demo): a successful server-side match opens a short-lived
     # biometric session bound to THIS browser. A failed scan invalidates any
@@ -1053,12 +1132,17 @@ def api_recognize():
             "similarity_score": match_res["similarity_score"],
             "threshold_used": match_res["threshold_used"],
             "all_scores": match_res["all_scores"][:5],  # top 5
-            "feature_extraction_latency_ms": pipeline_res["latency_ms"],
+            "feature_extraction_latency_ms": extraction_lat,
             "matching_latency_ms": round(matching_lat, 2),
             "total_latency_ms": round(total_lat, 2),
-            "preview_roi_b64": pipeline_res["preview_roi_bgr_b64"],
-            "preview_enhanced_b64": pipeline_res["preview_enhanced_b64"],
-            "preview_annotated_b64": pipeline_res["preview_annotated_b64"],
+            "preview_roi_b64": first_res["preview_roi_bgr_b64"] if ok_frames and ok_frames[0]["preview_roi_bgr_b64"] else "",
+            "preview_enhanced_b64": (ok_frames[0]["preview_enhanced_b64"] if ok_frames else "") or first_res.get("preview_enhanced_b64", ""),
+            "preview_annotated_b64": (ok_frames[0]["preview_annotated_b64"] if ok_frames else "") or first_res.get("preview_annotated_b64", ""),
+            "frames_received": len(images_b64),
+            "frames_quality_passed": len(ok_frames),
+            "frames_above_threshold": frames_above,
+            "fusion_min_frames_required": min_frames_required,
+            "match_reason": match_res.get("reason"),
             "message": match_res["message"],
         }
     )

@@ -79,13 +79,15 @@ def main():
     assert r.status_code == 200 and b"MERCHANT ZONE" in r.data and b"Start Payment" in r.data
     step(5, "Merchant POS loaded (two-zone terminal); Canteen + ₹100 sale started ✓")
 
-    # 6. Present Prabal's palm → recognized (score shown)
+    # 6. Present Prabal's palm → recognized (multi-frame burst, score shown)
+    burst = [img] * config.FUSION_WINDOW
     with patch("app.pipeline.process_frame", return_value=_pipeline_result(_variant(prabal_vec, 7))):
-        rec = json.loads(client.post("/api/recognize", data=json.dumps({"image": img}),
+        rec = json.loads(client.post("/api/recognize", data=json.dumps({"images": burst}),
                                      content_type="application/json").data)
     assert rec["recognized"] and rec["matched_user"]["name"] == "Prabal", rec
+    assert rec["frames_quality_passed"] >= config.FUSION_MIN_PASS_FRAMES, rec
     score = rec["similarity_score"]
-    step(6, f"Palm recognized: Prabal (score {score:.4f}) — server-side session opened ✓")
+    step(6, f"Palm recognized: Prabal (score {score:.4f}, {rec['frames_above_threshold']}/{rec['frames_quality_passed']} frames agree) — session opened ✓")
 
     # 7. Transaction processes: Prabal 500→400, Canteen +100
     pre_canteen = balances(canteen_uid)
@@ -119,7 +121,7 @@ def main():
     # 11. Wrong palm → Authentication Failed → balance unchanged
     impostor_vec = _unit_vec(999999)
     with patch("app.pipeline.process_frame", return_value=_pipeline_result(impostor_vec)):
-        rec2 = json.loads(client.post("/api/recognize", data=json.dumps({"image": img}),
+        rec2 = json.loads(client.post("/api/recognize", data=json.dumps({"images": [img] * config.FUSION_WINDOW}),
                                        content_type="application/json").data)
     assert not rec2["recognized"]
     r = client.post("/api/payment", data=json.dumps({"merchant_id": "m1", "amount": 50}),

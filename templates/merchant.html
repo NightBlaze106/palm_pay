@@ -157,6 +157,8 @@
 window.PALMPAY_POS = {
     maxAmount: {{ max_amount }},
     ttlSeconds: {{ ttl_seconds }},
+    fusionWindow: {{ fusion_window }},
+    fusionIntervalMs: {{ fusion_interval_ms }},
     embedded: true,
     merchants: [
         {% for m in merchants %}

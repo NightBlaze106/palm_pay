@@ -129,6 +129,7 @@ class EvaluationEngine:
         eer_point = None
         min_total_error = 999999
         suggested_t = config.DEFAULT_RECOGNITION_THRESHOLD
+        suggestion_policy = "default_uncalibrated"
 
         for t_int in range(0, 101, 2):  # 0.00, 0.02, ..., 1.00
             t = round(t_int / 100.0, 2)
@@ -176,10 +177,26 @@ class EvaluationEngine:
                         "frr": round(frr, 4),
                     }
 
-                # Suggested threshold based on minimum total errors with low FAR
+                # Legacy fallback heuristic: minimum total errors with low FAR.
                 if total_errors < min_total_error and far <= 0.05:
                     min_total_error = total_errors
                     suggested_t = t
+                    suggestion_policy = "min_error_far_le_5pct"
+
+        # ---- Strict operating-point policy (Accuracy Sprint) ----
+        # The old rule tolerated up to 5% false accepts — unacceptable for a
+        # payment demo where an unregistered palm must NEVER pass. New rule:
+        # pick the HIGHEST threshold with ZERO observed impostor accepts while
+        # still keeping genuine acceptance >= EVAL_SUGGESTION_MIN_GAR. This sits
+        # just below the weakest genuine pair and as far as possible above the
+        # entire observed impostor distribution.
+        zero_far_points = [
+            p for p in threshold_sweep
+            if p["imp_accept_count"] == 0 and p["gar"] >= config.EVAL_SUGGESTION_MIN_GAR
+        ]
+        if zero_far_points:
+            suggested_t = max(p["threshold"] for p in zero_far_points)
+            suggestion_policy = f"zero_far_gar_ge_{int(config.EVAL_SUGGESTION_MIN_GAR * 100)}pct"
 
         return {
             "status": "success",
@@ -193,6 +210,7 @@ class EvaluationEngine:
             "threshold_sweep": threshold_sweep,
             "eer_estimate": eer_point,
             "suggested_threshold": suggested_t,
+            "suggestion_policy": suggestion_policy,
             "detailed_genuine": genuine_scores,
             "detailed_impostor": impostor_scores,
         }

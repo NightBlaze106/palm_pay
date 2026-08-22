@@ -56,6 +56,7 @@ class PalmROIExtractor:
                 "angle_deg": 0.0,
                 "scale_px": 0.0,
                 "roi_polygon": [],
+                "knuckle_y_roi": None,
                 "message": "Insufficient hand landmarks for palm ROI extraction.",
             }
 
@@ -87,6 +88,7 @@ class PalmROIExtractor:
                 "angle_deg": 0.0,
                 "scale_px": float(len_v),
                 "roi_polygon": [],
+                "knuckle_y_roi": None,
                 "message": "Hand is too far from camera. Please move your palm closer.",
             }
 
@@ -122,6 +124,18 @@ class PalmROIExtractor:
             borderMode=cv2.BORDER_REPLICATE,
         )
 
+        # 5b. Knuckle line in ROI coordinates (finger masking support):
+        # project the four MCP joints through the same affine matrix. In the
+        # normalized canvas the wrist sits near the bottom and knuckles above
+        # the palm center, so rows with smaller y than this line are fingers.
+        mcp_pts = np.array(
+            [p_index_mcp, p_middle_mcp, p_ring_mcp, p_pinky_mcp],
+            dtype=np.float32,
+        )  # shape (4, 2)
+        ones_col = np.ones((4, 1), dtype=np.float32)
+        roi_mcp = (rot_mat @ np.hstack([mcp_pts, ones_col]).T).T  # (4, 2)
+        knuckle_y_roi = float(np.mean(roi_mcp[:, 1])) + float(config.FINGER_MASK_OFFSET_PX)
+
         # 6. Compute 4 corner points of the ROI in original frame coordinates for visualization
         # Canonical corners relative to target canvas:
         canonical_corners = np.array(
@@ -146,6 +160,7 @@ class PalmROIExtractor:
             "angle_deg": float(angle_deg),
             "scale_px": float(ref_scale),
             "roi_polygon": polygon_points,
+            "knuckle_y_roi": knuckle_y_roi,
             "message": "Palm ROI successfully extracted and normalized.",
         }
 

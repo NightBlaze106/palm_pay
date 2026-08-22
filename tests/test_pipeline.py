@@ -4,7 +4,7 @@ Tests:
 - HandDetector landmark extraction
 - PalmROIExtractor affine normalization and geometry
 - PalmPreprocessor grayscale & CLAHE enhancement
-- MBuLBPFeatureExtractor uniform LBP mapping and 944-D output shape
+- MBuLBPFeatureExtractor uniform LBP mapping and multi-scale output shape
 - PalmMatcher cosine similarity and 1:N decision rules
 - Database SQLite operations and vector blob serialization
 """
@@ -80,12 +80,16 @@ class TestBiometricPipeline(unittest.TestCase):
         self.assertTrue(np.all(prep["normalized"] >= 0.0) and np.all(prep["normalized"] <= 1.0))
 
     def test_feature_extraction_dimension_and_norm(self):
-        """Verify that MB-uLBP produces exactly a 944-dimensional unit-norm vector."""
+        """Verify that MB-uLBP produces exactly the configured multi-scale unit-norm vector."""
         dummy_enhanced = np.random.randint(0, 256, (config.ROI_HEIGHT, config.ROI_WIDTH), dtype=np.uint8)
         vec = self.feature_extractor.extract_features(dummy_enhanced)
 
         self.assertEqual(vec.shape, (config.FEATURE_VECTOR_DIM,))
-        self.assertEqual(len(vec), 944)
+        self.assertEqual(len(vec), config.FEATURE_VECTOR_DIM)
+        self.assertEqual(
+            len(vec),
+            config.LBP_GRID_X * config.LBP_GRID_Y * config.LBP_BINS_PER_BLOCK * len(config.LBP_RADII),
+        )
         self.assertEqual(vec.dtype, np.float32)
 
         # L2 Norm of non-zero feature vector must be 1.0
@@ -146,12 +150,13 @@ class TestBiometricPipeline(unittest.TestCase):
         uid_dup = db.add_user("Test User 2", "1MS21CS999")
         self.assertIsNone(uid_dup)
 
-        # Add 3 templates
+        # Add 3 templates (current model dimension + name — the DB layer only
+        # serves templates matching the active model)
         templates = [
-            np.random.randn(944).astype(np.float32) for _ in range(3)
+            np.random.randn(config.FEATURE_VECTOR_DIM).astype(np.float32) for _ in range(3)
         ]
         templates = [t / np.linalg.norm(t) for t in templates]
-        success = db.add_templates(uid, templates, "MB-uLBP-CLAHE-v1")
+        success = db.add_templates(uid, templates, config.MODEL_NAME)
         self.assertTrue(success)
 
         # Retrieve and verify
@@ -160,7 +165,12 @@ class TestBiometricPipeline(unittest.TestCase):
         self.assertEqual(all_users[0]["name"], "Test User")
         self.assertEqual(all_users[0]["sample_count"], 3)
         self.assertEqual(len(all_users[0]["templates"]), 3)
-        self.assertEqual(all_users[0]["templates"][0].shape, (944,))
+        self.assertEqual(all_users[0]["templates"][0].shape, (config.FEATURE_VECTOR_DIM,))
+
+        # Templates from a different model version must be ignored by the loader
+        stale = [np.random.randn(944).astype(np.float32)]
+        db.add_templates(uid, stale, "OLD-MODEL-v0")
+        self.assertEqual(len(db.get_all_users_with_templates()[0]["templates"]), 3)
 
         # Verify exact vector deserialization fidelity
         np.testing.assert_allclose(all_users[0]["templates"][0], templates[0], rtol=1e-5)
