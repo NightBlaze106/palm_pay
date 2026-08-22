@@ -1,0 +1,120 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Admin Dashboard — PalmPay{% endblock %}
+
+{% block admin_content %}
+<div class="merchant-toolbar">
+    <div>
+        <h1 class="pay-title" style="font-size:22px;">System Overview</h1>
+        <p class="t-sm muted" style="margin-top:2px;">All wallets, users, and payment activity — Demo / Prototype</p>
+    </div>
+    <span class="badge badge-demo">DEMO / PROTOTYPE</span>
+</div>
+
+<div class="stats-row">
+    <div class="stat-card">
+        <span class="stat-label">Total Transactions</span>
+        <span class="stat-value">{{ pay_stats.total_transactions }}</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-label">Total Volume (Success)</span>
+        <span class="stat-value">₹{{ "%.2f"|format(pay_stats.total_volume) }}</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-label">Consumers</span>
+        <span class="stat-value">{{ consumers|length }}</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-label">Merchants</span>
+        <span class="stat-value">{{ merchants|length }}</span>
+    </div>
+</div>
+
+{% if pending_topups %}
+<div class="card" style="margin-top:20px;border-color:#F6C26B;">
+    <div class="section-label" style="margin:0 0 8px;">
+        Consumer Top-Up Requests
+        <span class="badge badge-pending">{{ pending_topups|length }} PENDING</span>
+    </div>
+    <div class="tbl-wrap">
+        <table class="txn-table">
+            <thead><tr><th>Requested At</th><th>Consumer</th><th>Amount</th><th>Action</th></tr></thead>
+            <tbody>
+            {% for r in pending_topups %}
+                <tr id="topup-req-row-{{ r.id }}">
+                    <td>{{ r.created_at[:19]|replace('T',' ') }}</td>
+                    <td><strong>{{ r.consumer_name }}</strong> ({{ r.consumer_usn }})</td>
+                    <td style="font-weight:700;color:var(--green);">+₹{{ "%.2f"|format(r.amount) }}</td>
+                    <td><button class="btn-success btn-sm topup-approve-btn" data-id="{{ r.id }}">✓ Approve</button></td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px;" class="admin-cols">
+    <div class="card">
+        <div class="section-label" style="margin:0 0 6px;">Consumers &amp; Wallets</div>
+        <div class="tbl-wrap">
+            <table class="txn-table">
+                <thead><tr><th>User</th><th>USN</th><th>Balance</th><th></th></tr></thead>
+                <tbody>
+                {% for w in consumers %}
+                    <tr>
+                        <td><strong>{{ w.name }}</strong></td>
+                        <td>{{ w.usn }}</td>
+                        <td style="font-weight:700;">₹{{ "%.2f"|format(w.balance) }}</td>
+                        <td><a class="btn-outline btn-sm" href="{{ url_for('consumer_dashboard', user_id=w.user_id) }}">View wallet</a></td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="4" class="dim" style="text-align:center;padding:24px;">No consumers enrolled yet. Enroll via the biometric suite.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-label" style="margin:0 0 6px;">Merchant Wallets</div>
+        <div class="tbl-wrap">
+            <table class="txn-table">
+                <thead><tr><th>Merchant</th><th>Category</th><th>Balance</th><th></th></tr></thead>
+                <tbody>
+                {% for w in merchants %}
+                    <tr>
+                        <td><strong>{{ w.name }}</strong></td>
+                        <td>{{ merchant_category(w.user_id) }}</td>
+                        <td style="font-weight:700;">₹{{ "%.2f"|format(w.balance) }}</td>
+                        <td><a class="btn-outline btn-sm" href="/merchant?merchant_id={{ merchant_config_id(w.user_id) }}">Dashboard</a></td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<style>
+@media (max-width: 900px){ .admin-cols { grid-template-columns:1fr !important; } }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.topup-approve-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        btn.disabled = true;
+        btn.textContent = '⏳ Approving...';
+        try {
+            const resp = await fetch(`/api/topup_request/${id}/approve`, { method: 'POST' });
+            const data = await resp.json();
+            if (data.success) window.location.reload();
+            else { alert(data.message); btn.disabled = false; btn.textContent = '✓ Approve'; }
+        } catch (err) { alert('Network error: ' + err.message); }
+    });
+});
+</script>
+{% endblock %}

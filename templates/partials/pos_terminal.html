@@ -1,0 +1,87 @@
+<!-- PalmPay POS terminal (two-zone): included by /pay (standalone) and the
+     merchant console "POS" view (everything-in-one-page). Single source of truth. -->
+<div class="pos-layout">
+    <!-- ================= MERCHANT ZONE ================= -->
+    <section class="card zone-card" id="merchant-zone">
+        <div class="zone-badge zone-merchant">MERCHANT ZONE</div>
+
+        <!-- Setup controls -->
+        <div id="sale-setup">
+            <h1 class="pay-title" style="margin-bottom:2px;">New Sale</h1>
+            <p class="t-sm muted" style="margin-bottom:14px;">Select your store and enter the amount.</p>
+
+            <label for="merchant-select">Store</label>
+            <select id="merchant-select" style="margin-bottom:14px;">
+                {% for m in merchants %}
+                <option value="{{ m.merchant_id }}" data-name="{{ m.name }}" {{ 'selected' if selected_merchant_id == m.merchant_id }}>{{ m.name }} — {{ m.category }}</option>
+                {% endfor %}
+            </select>
+
+            <label for="pos-amount">Amount (₹)</label>
+            <input type="number" id="pos-amount" class="amount-input" placeholder="0" min="1"
+                   max="{{ max_amount }}" step="1" inputmode="numeric">
+            <div class="t-xs dim" style="text-align:center;margin-top:6px;">Min ₹1 &middot; Max ₹{{ max_amount }}</div>
+
+            <div class="quick-amts">
+                <button class="chip" data-amt="10">₹10</button>
+                <button class="chip" data-amt="20">₹20</button>
+                <button class="chip" data-amt="50">₹50</button>
+                <button class="chip" data-amt="100">₹100</button>
+                <button class="chip" data-amt="200">₹200</button>
+            </div>
+            <p id="amount-error" class="t-sm" style="color:var(--red);margin-top:10px;display:none;"></p>
+
+            <button id="btn-start-sale" class="btn-primary btn-block" style="margin-top:16px;" disabled>Start Payment →</button>
+        </div>
+
+        <!-- Active sale summary -->
+        <div id="sale-active" style="display:none;">
+            <h1 class="pay-title" style="margin-bottom:2px;">Sale in progress</h1>
+            <p class="t-sm muted" style="margin-bottom:14px;">Ask the customer to show their palm.</p>
+
+            <div class="active-sale-box">
+                <div class="t-xs dim" style="text-transform:uppercase;letter-spacing:0.5px;">Amount to collect</div>
+                <div style="font-size:38px;font-weight:800;">₹<span id="active-amount">0</span></div>
+                <div class="t-sm" style="color:var(--text-2);margin-top:4px;">
+                    at <strong id="active-merchant">—</strong>
+                </div>
+            </div>
+
+            <div class="status-line" id="sale-status-line">
+                <span class="pulse-dot"></span> Waiting for customer…
+            </div>
+
+            <p class="t-xs dim" style="margin-top:14px;">
+                Amount is locked until this sale completes.
+            </p>
+            <button id="btn-cancel-sale" class="btn-outline btn-block" style="margin-top:12px;">Cancel Sale</button>
+        </div>
+    </section>
+
+    <!-- ================= CUSTOMER ZONE ================= -->
+    <section class="card zone-card" id="customer-zone">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="zone-badge zone-customer">CUSTOMER ZONE</div>
+            <span class="t-xs dim">No phone needed — palm only</span>
+        </div>
+
+        <div class="camera-pos-box tall" id="camera-box">
+            <video id="webcam-video" autoplay playsinline muted></video>
+            <canvas id="camera-canvas" class="overlay"></canvas>
+            <span class="detect-status" id="detect-status">CAMERA OFF</span>
+            <div class="camera-instruction" id="camera-instruction">Camera starts automatically when payment begins</div>
+            <img id="roi-thumb" class="roi-preview-thumb" alt="Palm ROI" style="display:none;">
+        </div>
+
+        <div style="display:flex;align-items:center;gap:14px;margin-top:14px;">
+            <div style="flex:1;">
+                <div class="t-xs dim" style="margin-bottom:5px;">Biometric score</div>
+                <div class="score-track"><div class="score-fill" id="score-fill"></div></div>
+                <div class="t-sm" id="score-text" style="margin-top:5px;color:var(--text-2);">—</div>
+            </div>
+        </div>
+
+        <!-- Result / alert panel -->
+        <div id="result-panel" style="display:none;"></div>
+    </section>
+</div>

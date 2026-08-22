@@ -1,0 +1,36 @@
+{% extends "pay_base.html" %}
+
+{% block title %}Admin Login — PalmPay{% endblock %}
+
+{% block content %}
+<div class="admin-login-wrap">
+    <div class="card admin-login-card">
+        <div style="text-align:center;margin-bottom:22px;">
+            <div class="brand-dot" style="width:52px;height:52px;font-size:26px;margin:0 auto 12px;border-radius:14px;background:linear-gradient(135deg,#1A73E8,#0D47A1);display:flex;align-items:center;justify-content:center;">✋</div>
+            <h1 class="pay-title" style="font-size:20px;">PalmPay Admin</h1>
+            <p class="t-sm" style="color:var(--text-2);margin-top:4px;">Demo / Prototype console</p>
+        </div>
+
+        {% if error %}
+        <div class="badge badge-failed" style="margin-bottom:14px;width:100%;justify-content:center;padding:9px 10px;">
+            ✗ {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="{{ url_for('admin_login', next=request.args.get('next')) }}">
+            <div style="margin-bottom:14px;">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" value="admin" autocomplete="username" required>
+            </div>
+            <div style="margin-bottom:20px;">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" autocomplete="current-password" required autofocus>
+            </div>
+            <button type="submit" class="btn-primary btn-block">Log in</button>
+        </form>
+        <p class="t-xs dim" style="text-align:center;margin-top:16px;">
+            Demo credentials — user: <strong>admin</strong> · password set in config.py
+        </p>
+    </div>
+</div>
+{% endblock %}

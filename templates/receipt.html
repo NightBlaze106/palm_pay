@@ -1,0 +1,77 @@
+{% extends "pay_base.html" %}
+
+{% block title %}Receipt — PalmPay{% endblock %}
+
+{% block content %}
+<div class="receipt-wrap">
+    {% if not txn %}
+    <div class="card receipt-card" style="text-align:center;">
+        <div style="font-size:40px;margin-bottom:8px;">🧾</div>
+        <h1 class="pay-title">Receipt not found</h1>
+        <p class="t-sm muted" style="margin-top:6px;">This transaction does not exist.</p>
+        <a href="/" class="btn-primary btn-block no-print" style="margin-top:18px;">Back Home</a>
+    </div>
+    {% else %}
+    <div class="card receipt-card">
+        <div style="text-align:center;">
+            <div style="display:flex;align-items:center;justify-content:center;gap:9px;">
+                <div class="brand-dot" style="background:linear-gradient(135deg,#1A73E8,#0D47A1);width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;">✋</div>
+                <span style="font-weight:800;font-size:19px;">PalmPay</span>
+                <span class="badge badge-demo">DEMO RECEIPT</span>
+            </div>
+            <p class="t-xs dim" style="margin-top:4px;">Contactless Palm Biometric Payments</p>
+        </div>
+
+        <div class="receipt-divider"></div>
+
+        <div style="text-align:center;">
+            <div class="t-xs dim" style="text-transform:uppercase;letter-spacing:0.5px;">
+                {{ 'Amount Paid' if txn.type == 'PAYMENT' else ('Top Up' if txn.type == 'TOPUP' else 'Cash Out') }}
+            </div>
+            <div style="font-size:36px;font-weight:800;color:{{ 'var(--green)' if txn.status == 'SUCCESS' and txn.type != 'PAYMENT' else ('var(--red)' if txn.status == 'SUCCESS' else 'var(--text-3)') }};">
+                ₹{{ "%.2f"|format(txn.amount) }}
+            </div>
+            <div style="margin-top:8px;">
+                {% if txn.status == 'SUCCESS' %}<span class="badge badge-success">SUCCESS</span>
+                {% elif txn.status == 'FAILED_BALANCE' %}<span class="badge badge-failed">FAILED — NO BALANCE</span>
+                {% elif txn.status == 'FAILED_AUTH' %}<span class="badge badge-failed">FAILED — AUTH</span>
+                {% else %}<span class="badge badge-failed">{{ txn.status }}</span>{% endif %}
+            </div>
+        </div>
+
+        <div class="receipt-divider"></div>
+
+        <div class="receipt-row"><span class="rl">Transaction ID</span><span class="rr" style="font-family:monospace;">{{ txn.id[:8] }}</span></div>
+        <div class="receipt-row"><span class="rl">Date &amp; Time</span><span class="rr">{{ txn.created_at[:19]|replace('T',' ') }} UTC</span></div>
+        <div class="receipt-row"><span class="rl">Consumer</span><span class="rr">{{ txn.sender_name or '—' }}</span></div>
+        {% if txn.merchant_name %}
+        <div class="receipt-row"><span class="rl">Merchant</span><span class="rr">{{ txn.merchant_name }}</span></div>
+        {% endif %}
+        <div class="receipt-row">
+            <span class="rl">Biometric Score</span>
+            <span class="rr">
+                {% if txn.biometric_score is not none %}
+                    {{ "%.4f"|format(txn.biometric_score) }}
+                    {% if txn.biometric_score > threshold %} <span style="color:var(--green);font-weight:700;">· Palm Verified ✓</span>{% endif %}
+                {% else %}—{% endif %}
+            </span>
+        </div>
+        {% if txn.note %}
+        <div class="receipt-row"><span class="rl">Note</span><span class="rr">{{ txn.note }}</span></div>
+        {% endif %}
+
+        <div class="receipt-divider"></div>
+
+        <p class="t-xs dim" style="text-align:center;line-height:1.5;">
+            ⚠ This is a simulated transaction.<br>
+            PalmPay Demo / Prototype — no real money was transferred.
+        </p>
+    </div>
+
+    <div class="no-print" style="display:flex;gap:12px;margin-top:14px;">
+        <button onclick="window.print()" class="btn-outline" style="flex:1;">🖨 Print</button>
+        <a href="/consumer?user_id={{ txn.sender_user_id or '' }}" class="btn-primary" style="flex:1;">Done</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

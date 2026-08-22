@@ -1,0 +1,94 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Admin Cash Outs — PalmPay{% endblock %}
+
+{% block admin_content %}
+<div class="merchant-toolbar">
+    <div>
+        <h1 class="pay-title" style="font-size:22px;">Cash Out Requests</h1>
+        <p class="t-sm muted" style="margin-top:2px;">Approvals are logged only — no real transfer occurs (Demo / Prototype).</p>
+    </div>
+    <span class="badge badge-demo">DEMO / PROTOTYPE</span>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+    <div class="section-label" style="margin:0 0 6px;">
+        Pending Requests
+        {% if pending %}<span class="badge badge-pending">{{ pending|length }} PENDING</span>{% endif %}
+    </div>
+    <div class="tbl-wrap">
+        <table class="txn-table">
+            <thead><tr><th>Requested At</th><th>Merchant</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
+            <tbody id="pending-body">
+            {% for r in pending %}
+                <tr id="cashout-row-{{ r.id }}">
+                    <td>{{ r.created_at[:19]|replace('T',' ') }}</td>
+                    <td><strong>{{ r.merchant_name }}</strong></td>
+                    <td style="font-weight:700;">₹{{ "%.2f"|format(r.amount) }}</td>
+                    <td><span class="badge badge-pending">PENDING</span></td>
+                    <td><button class="btn-success btn-sm approve-btn" data-id="{{ r.id }}">✓ Approve</button></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="5" class="dim" style="text-align:center;padding:24px;">No pending cash out requests.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <div class="section-label" style="margin:0 0 6px;">Request History</div>
+    <div class="tbl-wrap">
+        <table class="txn-table">
+            <thead><tr><th>Requested At</th><th>Merchant</th><th>Amount</th><th>Status</th></tr></thead>
+            <tbody>
+            {% for r in history %}
+                <tr>
+                    <td>{{ r.created_at[:19]|replace('T',' ') }}</td>
+                    <td>{{ r.merchant_name }}</td>
+                    <td>₹{{ "%.2f"|format(r.amount) }}</td>
+                    <td>
+                        {% if r.status == 'APPROVED' %}
+                        <span class="badge badge-success">APPROVED</span>
+                        {% else %}
+                        <span class="badge badge-pending">PENDING</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="4" class="dim" style="text-align:center;padding:24px;">No cash out requests yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.approve-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        btn.disabled = true;
+        btn.textContent = '⏳ Approving...';
+        try {
+            const resp = await fetch(`/api/cashout/${id}/approve`, { method: 'POST' });
+            const data = await resp.json();
+            if (data.success) {
+                const row = document.getElementById(`cashout-row-${id}`);
+                if (row) row.remove();
+                window.location.reload();
+            } else {
+                alert(data.message);
+                btn.disabled = false;
+                btn.textContent = '✓ Approve';
+            }
+        } catch (err) {
+            alert('Network error: ' + err.message);
+            btn.disabled = false;
+            btn.textContent = '✓ Approve';
+        }
+    });
+});
+</script>
+{% endblock %}

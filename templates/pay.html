@@ -1,0 +1,35 @@
+{% extends "pay_base.html" %}
+
+{% block title %}PalmPay POS — Merchant Terminal{% endblock %}
+
+{% block content %}
+<div class="pos-shell">
+    <header class="app-header" style="padding-bottom:14px;">
+        <div class="app-brand">
+            <div class="brand-dot">✋</div>
+            <span class="brand-name">PalmPay</span>
+        </div>
+        <span class="badge badge-demo">POS · MERCHANT TERMINAL · DEMO</span>
+    </header>
+
+    {% set selected_merchant_id = request.args.get('merchant_id', merchants[0].merchant_id if merchants else '') %}
+    {% include "partials/pos_terminal.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+window.PALMPAY_POS = {
+    maxAmount: {{ max_amount }},
+    ttlSeconds: {{ ttl_seconds }},
+    embedded: false,
+    merchants: [
+        {% for m in merchants %}
+        { id: "{{ m.merchant_id }}", name: "{{ m.name }}", category: "{{ m.category }}" }{% if not loop.last %},{% endif %}
+        {% endfor %}
+    ]
+};
+</script>
+<script src="{{ url_for('static', filename='js/camera.js') }}"></script>
+<script src="{{ url_for('static', filename='js/pay.js') }}"></script>
+{% endblock %}

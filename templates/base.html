@@ -21,6 +21,7 @@
                 <li><a href="{{ url_for('recognize_page') }}" class="nav-link {% if request.path == '/recognize' %}active{% endif %}">Recognition</a></li>
                 <li><a href="{{ url_for('users_page') }}" class="nav-link {% if request.path == '/users' %}active{% endif %}">Enrolled Users</a></li>
                 <li><a href="{{ url_for('test_page') }}" class="nav-link {% if request.path == '/test' %}active{% endif %}">Evaluation & Test</a></li>
+                <li><a href="{{ url_for('consumer_dashboard') }}" class="nav-link {% if request.path.startswith(('/consumer','/pay','/merchant','/transactions','/receipt','/admin')) %}active{% endif %}">💳 Payment Demo</a></li>
             </ul>
         </nav>
     </header>

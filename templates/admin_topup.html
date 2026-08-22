@@ -1,0 +1,101 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Admin Top Up — PalmPay{% endblock %}
+
+{% block head %}
+<style>
+.topup-grid { display:grid; grid-template-columns: 380px 1fr; gap:16px; }
+@media (max-width: 900px){ .topup-grid { grid-template-columns:1fr; } }
+</style>
+{% endblock %}
+
+{% block admin_content %}
+<div class="merchant-toolbar">
+    <div>
+        <h1 class="pay-title" style="font-size:22px;">Top Up Consumer Wallet</h1>
+        <p class="t-sm muted" style="margin-top:2px;">Directly add demo money to any consumer wallet.</p>
+    </div>
+    <span class="badge badge-demo">DEMO / PROTOTYPE</span>
+</div>
+
+<div class="topup-grid">
+    <div class="card">
+        <form id="topup-form">
+            <div style="margin-bottom:16px;">
+                <label for="tu-user">Select consumer</label>
+                <select id="tu-user" required>
+                    <option value="" disabled selected>— Choose consumer —</option>
+                    {% for w in consumers %}
+                    <option value="{{ w.user_id }}">{{ w.name }} ({{ w.usn }}) — ₹{{ "%.2f"|format(w.balance) }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div style="margin-bottom:16px;">
+                <label for="tu-amount">Amount (₹)</label>
+                <input type="number" id="tu-amount" min="1" step="0.01" placeholder="e.g. 500" required>
+            </div>
+            <button type="submit" id="tu-submit" class="btn-primary btn-block">Confirm Top Up</button>
+            <p id="tu-feedback" class="t-sm" style="margin-top:12px;text-align:center;display:none;"></p>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="section-label" style="margin:0 0 6px;">Recent Top Ups</div>
+        <div class="tbl-wrap">
+            <table class="txn-table">
+                <thead><tr><th>Time</th><th>Consumer</th><th>Amount</th><th>Status</th></tr></thead>
+                <tbody>
+                {% for t in recent_topups %}
+                <tr>
+                    <td>{{ t.created_at[:19]|replace('T',' ') }}</td>
+                    <td>{{ t.sender_name or '—' }}</td>
+                    <td style="color:var(--green);font-weight:700;">+₹{{ "%.2f"|format(t.amount) }}</td>
+                    <td><span class="badge badge-success">TOPUP</span></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="dim" style="text-align:center;padding:24px;">No top-ups logged yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('topup-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const userId = document.getElementById('tu-user').value;
+    const amount = parseFloat(document.getElementById('tu-amount').value);
+    const feedback = document.getElementById('tu-feedback');
+    const btn = document.getElementById('tu-submit');
+    if (!userId || isNaN(amount) || amount <= 0) return;
+
+    btn.disabled = true;
+    try {
+        const resp = await fetch('/api/topup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: parseInt(userId, 10), amount: amount })
+        });
+        const data = await resp.json();
+        feedback.style.display = 'block';
+        if (data.success) {
+            feedback.style.color = 'var(--green)';
+            feedback.textContent = '✓ ' + data.message;
+            setTimeout(() => window.location.reload(), 900);
+        } else {
+            feedback.style.color = 'var(--red)';
+            feedback.textContent = '✗ ' + data.message;
+            btn.disabled = false;
+        }
+    } catch (err) {
+        feedback.style.display = 'block';
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Network error: ' + err.message;
+        btn.disabled = false;
+    }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "pay_base.html" %}
+
+{% block body_class %}pay-admin{% endblock %}
+
+{% block content %}
+<div class="merchant-shell">
+    <aside class="sidebar">
+        <div class="side-brand">
+            <div class="brand-dot">✋</div>
+            <div>
+                <div class="brand-name" style="font-weight:700;">PalmPay</div>
+                <div style="font-size:11px;color:var(--text-3);">Admin Console</div>
+            </div>
+        </div>
+        <nav>
+            {% set nav = nav_active|default('') %}
+            <a href="{{ url_for('admin_dashboard') }}" class="{{ 'active' if nav == 'dashboard' }}">
+                <span class="nav-ico">📊</span> Dashboard
+            </a>
+            <a href="{{ url_for('admin_topup') }}" class="{{ 'active' if nav == 'topup' }}">
+                <span class="nav-ico">⬆️</span> Top Up
+            </a>
+            <a href="{{ url_for('admin_cashouts') }}" class="{{ 'active' if nav == 'cashouts' }}">
+                <span class="nav-ico">💸</span> Cash Outs
+            </a>
+            <a href="{{ url_for('index') }}">
+                <span class="nav-ico">🖐️</span> Biometric Suite
+            </a>
+        </nav>
+        <div class="side-footer">
+            Demo / Prototype — no real money moves.<br><br>
+            <a href="{{ url_for('admin_logout') }}" style="color:var(--red);font-weight:600;">Log out</a>
+        </div>
+    </aside>
+    <main class="merchant-main">
+        {% block admin_content %}{% endblock %}
+    </main>
+</div>
+{% endblock %}

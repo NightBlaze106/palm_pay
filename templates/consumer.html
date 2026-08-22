@@ -1,0 +1,158 @@
+{% extends "pay_base.html" %}
+
+{% block title %}PalmPay Wallet{% endblock %}
+
+{% block content %}
+{% if not consumer %}
+<div class="consumer-shell" style="display:flex;flex-direction:column;justify-content:center;min-height:100vh;">
+    <div class="card" style="text-align:center;">
+        <div style="font-size:44px;margin-bottom:10px;">✋</div>
+        <h1 class="pay-title">No wallets yet</h1>
+        <p class="t-sm muted" style="margin-top:8px;">Enroll a palm in the biometric suite first — every enrolled user automatically gets a Demo wallet.</p>
+        <a href="/enroll" class="btn-primary btn-block" style="margin-top:18px;">Open Enrollment</a>
+    </div>
+</div>
+{% else %}
+
+<div class="consumer-shell">
+    <!-- 1. HEADER -->
+    <header class="app-header">
+        <div class="app-brand">
+            <div class="brand-dot">✋</div>
+            <span class="brand-name">PalmPay</span>
+        </div>
+        <span class="badge badge-demo">DEMO WALLET</span>
+        <button class="settings-btn" title="Settings (coming soon)" disabled>⚙️</button>
+    </header>
+
+    <!-- Demo consumer switcher -->
+    {% if consumers|length > 1 %}
+    <div style="display:flex;align-items:center;gap:8px;margin:-4px 2px 12px;font-size:12px;color:var(--text-3);">
+        Demo user:
+        <select id="user-switcher" style="width:auto;padding:6px 10px;font-size:12px;border-radius:8px;">
+            {% for w in consumers %}
+            <option value="{{ w.user_id }}" {{ 'selected' if w.user_id == consumer.user_id }}>{{ w.name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    {% endif %}
+
+    <!-- 2. BALANCE CARD -->
+    <section class="balance-card">
+        <div class="t-xs" style="opacity:0.85;text-transform:uppercase;letter-spacing:0.5px;">Available Balance</div>
+        <div class="balance-hero" style="margin-top:4px;"><span class="rupee">₹</span>{{ "%.2f"|format(balance) }}</div>
+        <div style="margin-top:8px;font-size:13px;opacity:0.9;">{{ consumer.name }} &middot; {{ consumer.usn }}</div>
+        <div class="balance-actions" style="grid-template-columns:1fr;">
+            <button class="btn-outline" id="btn-topup" style="background:rgba(255,255,255,0.14);border-color:rgba(255,255,255,0.5);color:#fff;">↑ Top Up</button>
+        </div>
+        <div style="margin-top:12px;font-size:12px;opacity:0.85;display:flex;align-items:center;gap:6px;">
+            🖐 To pay, simply present your palm at any PalmPay merchant counter.
+        </div>
+    </section>
+
+    <!-- 3. QUICK STATS -->
+    <div class="quick-stats">
+        <div class="quick-stat">
+            <div class="qs-val">₹{{ "%.0f"|format(stats.spent_this_month) }}</div>
+            <div class="qs-lbl">Spent this month</div>
+        </div>
+        <div class="quick-stat">
+            <div class="qs-val">{{ stats.transaction_count }}</div>
+            <div class="qs-lbl">Transactions</div>
+        </div>
+        <div class="quick-stat">
+            <div class="qs-val" style="font-size:13px;padding-top:3px;">
+                {% if stats.last_payment %}{{ stats.last_payment.merchant_name }}{% else %}—{% endif %}
+            </div>
+            <div class="qs-lbl">Last payment</div>
+        </div>
+    </div>
+
+    <!-- 4. RECENT TRANSACTIONS -->
+    <div class="section-label">
+        Recent Transactions
+        <a href="/transactions?role=consumer&user_id={{ consumer.user_id }}">View All →</a>
+    </div>
+    <div class="card" style="padding:4px 18px;">
+        {% for t in recent_txns %}
+        <div class="txn-card">
+            <div class="txn-icon {{ 'cat-library' if t.type == 'TOPUP' else merchant_theme_class(t.merchant_id) }}">
+                {{ '↑' if t.type == 'TOPUP' else ((t.merchant_name or '?')[:1]|upper) }}
+            </div>
+            <div class="txn-mid">
+                <div class="txn-name">{{ 'Wallet Top Up' if t.type == 'TOPUP' else (t.merchant_name or 'Payment') }}</div>
+                <div class="txn-time">{{ t.created_at[:16]|replace('T', ' ') }} UTC</div>
+                <div style="margin-top:3px;">
+                    {% if t.status == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    {% elif t.status == 'FAILED_BALANCE' %}
+                    <span class="badge badge-failed">NO BALANCE</span>
+                    {% elif t.status == 'FAILED_AUTH' %}
+                    <span class="badge badge-failed">AUTH FAILED</span>
+                    {% else %}
+                    <span class="badge badge-failed">FAILED</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="txn-right">
+                <div class="txn-amt {{ 'amt-received' if t.type == 'TOPUP' else 'amt-sent' }}">
+                    {{ '+' if t.type == 'TOPUP' else '−' }}₹{{ "%.2f"|format(t.amount) }}
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div style="text-align:center;padding:28px 0;" class="dim">
+            <div style="font-size:30px;margin-bottom:6px;">🧾</div>
+            <div class="t-sm">No transactions yet</div>
+            <div class="t-xs" style="margin-top:2px;">Top up your wallet, then pay a merchant.</div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if my_topup_requests %}
+    <div class="card" style="margin-top:14px;">
+        <div class="section-label" style="margin:0 0 6px;">My Top-Up Requests</div>
+        {% for r in my_topup_requests %}
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;font-size:13px;">
+            <span>₹{{ "%.2f"|format(r.amount) }} <span class="dim">&middot; {{ r.created_at[:16]|replace('T',' ') }}</span></span>
+            {% if r.status == 'APPROVED' %}<span class="badge badge-success">APPROVED</span>
+            {% else %}<span class="badge badge-pending">PENDING</span>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Bottom tab bar -->
+<nav class="tab-bar no-print">
+    <a href="/consumer?user_id={{ consumer.user_id }}" class="active"><span class="tab-ico">🏠</span>Home</a>
+    <a href="/transactions?role=consumer&user_id={{ consumer.user_id }}"><span class="tab-ico">🧾</span>History</a>
+    <a href="#" onclick="return false;"><span class="tab-ico">👤</span>Profile</a>
+</nav>
+
+<!-- Top-Up modal -->
+<div class="modal-overlay" id="topup-modal">
+    <div class="modal-sheet">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <h2 class="pay-title">Request Top Up</h2>
+            <button class="settings-btn" id="btn-close-topup">✕</button>
+        </div>
+        <p class="t-sm muted" style="margin-bottom:16px;">Enter an amount — an admin will approve it from the Demo console.</p>
+        <input type="number" id="topup-amount" class="amount-input" placeholder="0" min="1" step="0.01" inputmode="decimal">
+        <div class="quick-amts">
+            <button class="chip" data-amt="100">₹100</button>
+            <button class="chip" data-amt="200">₹200</button>
+            <button class="chip" data-amt="500">₹500</button>
+            <button class="chip" data-amt="1000">₹1000</button>
+        </div>
+        <button class="btn-primary btn-block" id="btn-submit-topup" style="margin-top:22px;">Submit Request</button>
+        <p id="topup-feedback" class="t-sm" style="text-align:center;margin-top:12px;display:none;"></p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>window.PALMPAY_USER_ID = {{ consumer.user_id if consumer else 'null' }};</script>
+<script src="{{ url_for('static', filename='js/consumer.js') }}"></script>
+{% endblock %}

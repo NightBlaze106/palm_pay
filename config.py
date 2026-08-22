@@ -53,3 +53,28 @@ MAX_ENROLLMENT_SAMPLES = 8
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 5000
 DEBUG_MODE = True
+
+# ---------------------------------------------------------
+# PalmPay Payment System (Demo / Prototype) Configuration
+# ---------------------------------------------------------
+
+# Admin panel credentials (demo only — hardcoded per Phase-2 prototype spec)
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "palmpay2025"
+
+# Biometric payment session: recognition result is trusted for this long (server-side)
+BIOMETRIC_SESSION_TTL_SECONDS = 30
+
+# Payment amount limits (INR)
+MAX_PAYMENT_AMOUNT = 5000
+
+# Hardcoded demo merchants (POS selector). Each merchant maps to a wallet-backed
+# user row via USN prefix "MERCH-" + upper-case id (e.g. "m1" -> usn "MERCH-M1").
+MERCHANTS = [
+    {"id": "m1", "name": "Canteen",    "category": "Food"},
+    {"id": "m2", "name": "Photocopy",  "category": "Services"},
+    {"id": "m3", "name": "Stationery", "category": "Retail"},
+    {"id": "m4", "name": "Library",    "category": "Services"},
+]
+
+MERCHANT_USN_PREFIX = "MERCH-"

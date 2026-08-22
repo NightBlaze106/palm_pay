@@ -1,0 +1,143 @@
+{% extends "pay_base.html" %}
+
+{% block title %}Transactions — PalmPay{% endblock %}
+
+{% block content %}
+<div class="merchant-main" style="max-width:1100px;margin:0 auto;">
+    <div class="merchant-toolbar">
+        <div>
+            <h1 class="pay-title" style="font-size:22px;">Transaction History</h1>
+            <p class="t-sm muted" style="margin-top:2px;">Demo / Prototype ledger — {{ role|capitalize }} view.</p>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            {% if role == 'consumer' and consumers %}
+            <select id="hist-user" style="width:auto;min-width:160px;padding:9px 14px;">
+                {% for w in consumers %}
+                <option value="{{ w.user_id }}" {{ 'selected' if current and current.user_id == w.user_id }}>{{ w.name }} ({{ w.usn }})</option>
+                {% endfor %}
+            </select>
+            {% elif merchants %}
+            <select id="hist-merchant" style="width:auto;min-width:160px;padding:9px 14px;">
+                {% for m in merchants %}
+                <option value="{{ m.merchant_id }}" {{ 'selected' if current and current.merchant_id == m.merchant_id }}>{{ m.name }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
+            <a id="export-csv" href="#" class="btn-outline btn-sm">⬇ Export CSV</a>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <form method="GET" action="/transactions" class="card" style="margin-bottom:16px;">
+        <input type="hidden" name="role" value="{{ role }}">
+        <input type="hidden" name="user_id" value="{{ current.user_id if current and role == 'consumer' else (current.merchant_id if current else '') }}">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+            <div style="flex:1;min-width:130px;">
+                <label for="f-from">From</label>
+                <input type="date" id="f-from" name="date_from" value="{{ filters.date_from }}">
+            </div>
+            <div style="flex:1;min-width:130px;">
+                <label for="f-to">To</label>
+                <input type="date" id="f-to" name="date_to" value="{{ filters.date_to }}">
+            </div>
+            <div style="flex:1;min-width:150px;">
+                <label for="f-status">Status</label>
+                <select id="f-status" name="status">
+                    <option value="">All statuses</option>
+                    {% for s in ['SUCCESS','FAILED_BALANCE','FAILED_AUTH','FAILED_AMOUNT'] %}
+                    <option value="{{ s }}" {{ 'selected' if filters.status == s }}>{{ s }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% if role == 'merchant' %}
+            <div style="flex:1;min-width:150px;">
+                <label for="f-merchant">Merchant</label>
+                <select id="f-merchant" disabled>
+                    <option selected>{{ current.name if current else '—' }}</option>
+                </select>
+            </div>
+            {% endif %}
+            <button type="submit" class="btn-primary btn-sm">Apply Filters</button>
+        </div>
+    </form>
+
+    <div class="card">
+        <div class="section-label" style="margin:0 0 6px;">{{ total }} transaction{{ '' if total == 1 else 's' }}</div>
+        <div class="tbl-wrap">
+            <table class="txn-table">
+                <thead><tr><th>Date/Time</th><th>Type</th><th>Party</th><th>Amount</th><th>Status</th><th>Biometric Score</th><th>Receipt</th></tr></thead>
+                <tbody>
+                {% for t in txns %}
+                    <tr>
+                        <td>{{ t.created_at[:19]|replace('T',' ') }}</td>
+                        <td>
+                            {% if t.type == 'TOPUP' %}<span class="badge badge-success">TOPUP</span>
+                            {% elif t.type == 'CASHOUT' %}<span class="badge badge-pending">CASHOUT</span>
+                            {% else %}<span class="badge badge-neutral">PAYMENT</span>{% endif %}
+                        </td>
+                        <td>
+                            {% if role == 'consumer' %}
+                                {{ t.merchant_name or ('Wallet Top Up' if t.type == 'TOPUP' else '—') }}
+                            {% else %}
+                                {{ t.sender_name or '—' }}
+                            {% endif %}
+                        </td>
+                        <td style="font-weight:700;" class="{{ 'amt-received' if t.status == 'SUCCESS' else 'amt-sent' }}">
+                            {{ '+' if t.type == 'TOPUP' or (role == 'merchant') else '−' }}₹{{ "%.2f"|format(t.amount) }}
+                        </td>
+                        <td>
+                            {% if t.status == 'SUCCESS' %}<span class="badge badge-success">SUCCESS</span>
+                            {% elif t.status == 'FAILED_BALANCE' %}<span class="badge badge-failed">NO BALANCE</span>
+                            {% elif t.status == 'FAILED_AUTH' %}<span class="badge badge-failed">AUTH FAILED</span>
+                            {% else %}<span class="badge badge-failed">{{ t.status }}</span>{% endif %}
+                        </td>
+                        <td>{{ "%.4f"|format(t.biometric_score) if t.biometric_score is not none else '—' }}</td>
+                        <td><a class="btn-outline btn-sm" href="/receipt/{{ t.id }}">View</a></td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="7" class="dim" style="text-align:center;padding:28px;">No transactions match these filters.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    {% if role == 'consumer' %}
+    <nav class="tab-bar no-print" style="max-width:none;left:0;transform:none;">
+        <a href="/consumer?user_id={{ current.user_id if current }}"><span class="tab-ico">🏠</span>Home</a>
+        <a href="/transactions?role=consumer&user_id={{ current.user_id if current }}" class="active"><span class="tab-ico">🧾</span>History</a>
+        <a href="#" onclick="return false;"><span class="tab-ico">👤</span>Profile</a>
+    </nav>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const params = new URLSearchParams(window.location.search);
+    const exportBtn = document.getElementById('export-csv');
+    if (exportBtn) {
+        const qs = new URLSearchParams();
+        qs.set('role', params.get('role') || 'consumer');
+        const uid = document.getElementById('hist-user');
+        const mid = document.getElementById('hist-merchant');
+        if (uid) qs.set('user_id', uid.value);
+        if (mid) qs.set('merchant_id', mid.value);
+        if (params.get('status')) qs.set('status', params.get('status'));
+        if (params.get('date_from')) qs.set('date_from', params.get('date_from'));
+        if (params.get('date_to')) qs.set('date_to', params.get('date_to'));
+        exportBtn.href = '/api/transactions/export?' + qs.toString();
+    }
+
+    const histUser = document.getElementById('hist-user');
+    if (histUser) histUser.addEventListener('change', () => {
+        window.location.href = `/transactions?role=consumer&user_id=${histUser.value}`;
+    });
+    const histMerchant = document.getElementById('hist-merchant');
+    if (histMerchant) histMerchant.addEventListener('change', () => {
+        window.location.href = `/transactions?role=merchant&user_id=${histMerchant.value}`;
+    });
+});
+</script>
+{% endblock %}
