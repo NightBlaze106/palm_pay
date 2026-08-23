@@ -1,247 +1,369 @@
-# PalmPay — Contactless Palm Biometric Authentication System (Phase-1 Prototype)
+# PalmPay — Contactless Palm Biometric Payment System
 
-**Project:** PalmPay — Contactless Palm Biometric Authentication Using RGB Camera  
-**Course Context:** 6th-Semester CSE Major Project  
-**Target Environment:** Intel i3-class Laptop / Windows 10/11 / 8 GB RAM / Standard USB RGB Webcam (No GPU / No Infrared required)
+**Project:** PalmPay — Pay Without Your Phone (Contactless Palm Biometrics on RGB Camera)
+**Course Context:** 6th-Semester CSE Major Project · **Status:** Demo prototype (v2-fm accuracy sprint shipped, real-palm calibration pending)
+
+> **What it does:** a merchant enters an amount at a POS terminal, the customer shows their
+> open palm to an ordinary webcam, and the system recognizes them and debits their wallet —
+> automatically, in a few seconds, with no phone, card, or touch.
+
+Companion docs:
+
+| Doc | Contents |
+|---|---|
+| `PROJECT_CONTEXT.md` | Session-continuation context: architecture decisions, decision log, current state |
+| `ROADMAP.md` | Product phases (Demo → Pilot → Robustness → Productization) and gates |
+| `AGENTS.md` | Dev-environment rules (venv discipline, node version manager, test policy) |
 
 ---
 
-## 1. Project Objective
-
-PalmPay is a low-cost, contactless palmprint biometric authentication system designed initially for campus environments such as college cafeterias, library access, or attendance check-ins.
-
-Phase-1 focuses strictly on validating and demonstrating the **biometric recognition pipeline**:
-$$\text{RGB Webcam Frame} \longrightarrow \text{Hand Landmark Detection} \longrightarrow \text{Palm ROI Extraction} \longrightarrow \text{Affine Normalization} \longrightarrow \text{CLAHE Preprocessing} \longrightarrow \text{Feature Extraction (MB-uLBP)} \longrightarrow \text{1:N Cosine Matching} \longrightarrow \text{Decision}$$
-
-> [!NOTE]
-> This is a research prototype. Phase 1 intentionally excludes payment infrastructure, digital wallets, and cloud backends (Firebase/AWS) to isolate and validate the biometric pipeline on local hardware.
-
----
-
-## 2. System Architecture
+## 1. System Overview
 
 ```
-                                  PALMPAY PHASE-1 ARCHITECTURE
-                                  
-   +---------------------------------------------------------------------------------------+
-   |                                 CLIENT / WEB BROWSER                                  |
-   |   [ Webcam 640x480 ] ---> [ HTML5 Canvas Overlay ] ---> [ WebRTC / Fetch REST API ]   |
-   +---------------------------------------------------------------------------------------+
-                                              │  Base64 Frames
-                                              ▼
-   +---------------------------------------------------------------------------------------+
-   |                             FLASK APPLICATION (app.py)                                |
-   |                                                                                       |
-   |  1. Hand Landmark Detection (core/hand_detector.py)                                   |
-   |     - MediaPipe Hands Tasks API (21 3D landmarks)                                     |
-   |                                                                                       |
-   |  2. Palm ROI Extraction & Normalization (core/roi.py)                                 |
-   |     - Wrist (0), Index MCP (5), Middle MCP (9), Pinky MCP (17)                        |
-   |     - Centroid & Vector Angle calculation                                             |
-   |     - Landmark-guided affine warping -> 128x128 px ROI                                |
-   |                                                                                       |
-   |  3. Preprocessing (core/preprocessing.py)                                             |
-   |     - Grayscale conversion                                                            |
-   |     - CLAHE local contrast enhancement (clipLimit=2.0, tileGrid=(8,8))                |
-   |                                                                                       |
-   |  4. Feature Extraction (core/features.py / core/palm_model.py)                        |
-   |     - Multi-Block Uniform LBP (MB-uLBP_{8,1}^u2)                                      |
-   |     - 4x4 spatial blocks x 59 uniform bins = 944-D vector                             |
-   |     - Global & block-level L2 normalization (||v||_2 = 1.0)                           |
-   |                                                                                       |
-   |  5. 1:N Biometric Matcher (core/matcher.py)                                           |
-   |     - Cosine Similarity: Sim(q, t) = q . t                                            |
-   |     - Experimental Decision Threshold Comparison                                      |
-   |                                                                                       |
-   |  6. Empirical Evaluation & Calibration (core/evaluation.py)                           |
-   |     - Genuine & Impostor cross-matching matrices                                      |
-   |     - GAR, FAR, FRR, EER point, CSV export                                            |
-   +---------------------------------------------------------------------------------------+
-                                              │
-                                              ▼
-   +---------------------------------------------------------------------------------------+
-   |                               LOCAL STORAGE (SQLite)                                  |
-   |   database/palmpay.db                                                                 |
-   |   ├── users table (id, name, usn, created_at)                                         |
-   |   └── templates table (id, user_id, feature_blob, feature_dim, model_name, created_at) |
-   |   * Note: Raw biometric images are NOT stored to protect user privacy.                |
-   +---------------------------------------------------------------------------------------+
+                 PALMPAY END-TO-END ARCHITECTURE (payment era)
+
+   MERCHANT POS (browser)                     CONSUMER (palm only)
+   ┌────────────────────────┐                 ┌──────────────────┐
+   │ amount + store select  │   640x480 RGB   │ presents open    │
+   │ "Start Payment"        │◄────frames──────┤ palm to webcam   │
+   └───────────┬────────────┘   base64 JPEG   └──────────────────┘
+               │ POST /api/recognize {images:[burst of 4]}
+               ▼
+   ┌─────────────────────────────────────────────────────────────────┐
+   │                FLASK BACKEND — BIOMETRIC PIPELINE                │
+   │                                                                  │
+   │  1. Hand Landmark Detection      (core/hand_detector.py)         │
+   │     MediaPipe Tasks HandLandmarker → 21 landmarks                │
+   │  2. Palm ROI + Affine Normalization (core/roi.py)                │
+   │     wrist/MCP anchors → rotation+scale-normalized 128×128 crop   │
+   │     (+ knuckle-line projection into ROI coordinates)             │
+   │  3. Preprocessing                (core/preprocessing.py)         │
+   │     grayscale → CLAHE(2.0,(8,8)) — Gaussian blur DISABLED        │
+   │  4. Capture Quality Gate         (core/pipeline.py)              │
+   │     rejects blur/glare/dark/too-far BEFORE scoring               │
+   │  5. Finger Masking               (core/pipeline.py)              │
+   │     rows above MCP knuckle line → feathered neutral fill         │
+   │  6. Feature Extraction           (core/features.py)              │
+   │     multi-scale uniform LBP, radii (1,2), 4×4 grid → 1888-D      │
+   │  7. Hardened Matching            (core/matcher.py)               │
+   │     dual mean-template AND best-sample pass + ambiguity guard    │
+   │  8. Multi-Frame Fusion           (app.py /api/recognize)         │
+   │     ≥3 of 4 frames must individually agree                       │
+   └───────────┬─────────────────────────────────────────────────────┘
+               │ success ⇒ server-side biometric session (opaque token,
+               │          30 s TTL, single-use) — never a user_id from JS
+               ▼
+   ┌─────────────────────────────────────────────────────────────────┐
+   │            PAYMENT LEDGER (SQLite, database/db.py)               │
+   │  /api/payment → atomic debit/credit + transaction row + receipt │
+   │  wallets · top-up requests · merchant cash-outs · audit rows     │
+   │  Raw palm images are NEVER stored — only float32 embeddings.     │
+   └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Technology Stack
+## 2. Technology Stack
 
-- **Backend:** Python 3.10+ / Flask 3.1
-- **Computer Vision & Landmarks:** MediaPipe Tasks 1.0+ (`HandLandmarker`), OpenCV (`opencv-python` 4.x), NumPy
-- **Database:** Local SQLite (`palmpay.db`)
-- **Frontend:** Semantic HTML5, Vanilla CSS3 (Slate theme, high-contrast, fully responsive), Vanilla JavaScript (WebRTC Camera API, Fetch API, HTML5 Canvas)
-- **Target Hardware:** Standard Intel i3 CPU, 8 GB RAM, ordinary RGB USB Webcam (runs fully on CPU without CUDA/GPU)
+| Layer | Technology | Why |
+|---|---|---|
+| Backend | **Python 3.11** (managed via `mise`), Flask 3.x | CPU-only inference, fast prototyping |
+| Hand tracking | **MediaPipe Tasks `HandLandmarker`** (`mediapipe>=0.10,<1.0`) | Real-time 21-landmark detection on CPU |
+| Vision | OpenCV 4.x, NumPy | Affine warps, CLAHE, vectorized LBP |
+| Storage | SQLite (single file, WAL-free demo mode) | Zero-config deployment on kiosk laptops |
+| Frontend | Vanilla HTML/CSS/JS, WebRTC `getUserMedia`, Fetch API | No build step, no CDN dependency, runs offline |
+| Hardware target | Intel i3-class laptop, 8 GB RAM, any USB RGB webcam | Deliberately low-cost, no GPU / NIR required |
 
----
-
-## 4. Pretrained Model Investigation & Research Basis
-
-### 4.1 Investigation of Pretrained Palmprint Models
-During initial project research, we evaluated publicly available deep learning palmprint recognition models (e.g., CCNet, PalmNet, CompCode, PalmprintViT). 
-- **Finding:** While research papers publish code and architectures for closed academic datasets (IITD, CASIA, Tongji, PolyU), there is **no standardized, turnkey off-the-shelf pretrained palmprint embedding package** on PyPI or Hugging Face designed for generic, unconstrained RGB webcam input without custom retraining.
-- **Scientific Primary Baseline:** Following the project specification, we implemented the standard literature baseline: **Multi-Block Uniform Local Binary Patterns ($MB\text{-}uLBP_{8,1}^{u2}$) with CLAHE Preprocessing and Landmark Affine Normalization**.
-
-### 4.2 Research Basis & Literature Survey
-
-1. **Zhang, D., Kong, W. K., You, J., & Wong, M. (2003). *Online palmprint identification.* IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI), 25(9), 1041-1050.**
-   - *Contribution:* Established 2D palmprint biometrics as a highly distinct modality based on principal line structures, wrinkles, and epidermal ridge patterns.
-2. **Ojala, T., Pietik&auml;inen, M., & M&auml;enp&auml;&auml;, T. (2002). *Multiresolution gray-scale and rotation invariant texture classification with local binary patterns.* IEEE TPAMI, 24(7), 971-987.**
-   - *Contribution:* Introduced uniform local binary patterns ($LBP_{P, R}^{u2}$). Proved that 58 uniform patterns account for over 90% of texture features while mapping non-uniform noise into a single bin (59 total bins).
-3. **Amrouni, M., et al. (2022). *Contactless palmprint preprocessing and recognition.* Journal of Biometrics.**
-   - *Contribution:* Demonstrated that Contrast Limited Adaptive Histogram Equalization (CLAHE) applied locally to extracted palm ROIs significantly enhances principal lines under variable ambient illumination.
-4. **Zhang, F., et al. (2020). *MediaPipe Hands: On-device real-time hand tracking.* arXiv preprint arXiv:2006.10214.**
-   - *Contribution:* Provided real-time 21 3D hand landmark estimation from a single RGB camera frame on standard mobile and desktop CPUs.
-5. **S&aacute;nchez-Brizuela, G., et al. (2023). *Landmark-based geometric normalization for contactless hand/palm biometric systems.* Sensors.**
-   - *Contribution:* Formulated landmark anchor vectors (wrist to middle MCP) for affine rotation and scale normalization in contactless hand biometrics.
+> ⚠️ **mediapipe is pinned `<1.0`:** the 1.x series' bundled TF-Lite runtime is killed by the
+> kernel during XNNPACK init on current Arch kernels (Tiger Lake). 0.10.35 is verified good.
+> See `AGENTS.md` for environment rules.
 
 ---
 
-## 5. Why RGB Camera & Why MediaPipe?
+## 3. The Recognition Pipeline (algorithm details)
 
-1. **Why RGB Camera?**
-   - High accessibility and near-zero incremental hardware cost. Ordinary USB webcams are universally available in campus kiosks, laptop labs, and point-of-sale terminals.
-   - Contactless hygiene (especially critical for cafeteria environments).
-2. **Why MediaPipe Hands?**
-   - Single-stage 21 landmark detection running in real-time on CPU.
-   - Provides consistent geometric anchor points (wrist, index MCP, middle MCP, pinky MCP) needed to calculate palm orientation and scale without manual hand alignment pegs.
+### Stage 1 — Hand landmark detection
+MediaPipe Tasks `HandLandmarker` (IMAGE mode) returns 21 3D landmarks per frame.
+Anchors used downstream: **wrist (0)**, **index MCP (5)**, **middle MCP (9)**,
+**ring MCP (13)**, **pinky MCP (17)**. Handedness is ignored (matching must be
+hand-agnostic).
+
+### Stage 2 — Palm ROI extraction & affine normalization (`core/roi.py`)
+All geometry is derived from landmarks, so no pegs/guides hardware is needed:
+
+$$C_{palm} = 0.45 \cdot P_0 + 0.55 \cdot \tfrac{P_5 + P_{17}}{2} \qquad \vec{v} = P_9 - P_0 \qquad \theta = \operatorname{atan2}(dy, dx) - 90^\circ$$
+
+$$S = \max\big(\lVert P_5 - P_{17}\rVert,\; 0.75\lVert\vec{v}\rVert\big) \cdot 1.05$$
+
+A single affine transform (rotation θ, scale $\text{roi\_width}/2S$) warps the frame onto a
+canonical **128×128** canvas (`BORDER_REPLICATE`). The same matrix is reused to project the
+four MCP joints into ROI coordinates, yielding the **knuckle cut-line** `knuckle_y_roi`
+consumed by Stage 5.
+
+### Stage 3 — Preprocessing (`core/preprocessing.py`)
+Grayscale → **CLAHE** (clipLimit 2.0, tile 8×8) to amplify principal flexion creases under
+variable illumination. **Gaussian smoothing is disabled** (`GAUSSIAN_BLUR_KERNEL=(0,0)`):
+measured impostor scores reached ~0.80 with blur enabled because it erased the exact
+micro-texture that separates palms. Noise is instead controlled by Stage 4 + Stage 8.
+
+### Stage 4 — Capture quality gate (`FrameQualityGate`)
+Frames are rejected *before feature extraction*, with human-readable coaching messages
+shown live in the UI:
+
+| Check | Threshold | Rejection message |
+|---|---|---|
+| Blur (Laplacian variance) | ≥ 40 | "Image too blurry — hold palm steady" |
+| Glare (fraction of pixels >245) | ≤ 8% | "Glare detected — tilt palm away" |
+| Mean brightness | ∈ [40, 232] | "Too dark" / "Over-exposed" |
+| Palm span | ≥ 60 px | "Palm too far — move closer" |
+
+### Stage 5 — Finger masking (`apply_finger_mask`)
+Rows **above** the projected knuckle line are replaced with a neutral fill equal to the mean
+brightness of the kept palm area, using a Gaussian-feathered mask edge (σ=3) and byte-exact
+rounding below the cut. Purpose: finger spread / pitch stops leaking into block histograms —
+a measured cause of room→hall recognition drift. Applied identically at enrollment and
+recognition (single code path ⇒ consistent by construction). Config: `FINGER_MASK_ENABLED`,
+`FINGER_MASK_OFFSET_PX`.
+
+### Stage 6 — Feature extraction: multi-block multi-scale uniform LBP (`core/features.py`)
+For each radius $R \in \{1, 2\}$ the enhanced ROI is coded with the standard operator
+
+$$LBP_{8,R}^{u2}(c) = \sum_{p=0}^{7} s(g_p - g_c)\,2^{\,p}, \qquad s(x)=\begin{cases}1 & x \ge 0\\ 0 & \text{else}\end{cases}$$
+
+then mapped through the 256→59 uniform-pattern lookup table (58 rotation-consistent uniform
+patterns + 1 non-uniform bin). The ROI is split into a **4×4 grid**; per block, per scale, a
+59-bin histogram is extracted, block-$L_2$ normalized, concatenated, then globally $L_2$
+normalized:
+
+$$\mathbf{v} \in \mathbb{R}^{1888},\; \lVert\mathbf{v}\rVert_2 = 1 \quad (4\times4\ \text{blocks} \times 59\ \text{bins} \times 2\ \text{scales})$$
+
+R=1 captures fine ridge micro-texture; R=2 adds coarser contextual texture — the classic
+multiresolution LBP accuracy lever. Layout order is fixed: block-major, R1 before R2.
+
+### Stage 7 — Hardened 1:N matching (`core/matcher.py`)
+Cosine similarity (unit vectors ⇒ dot product), clamped to [-1,1], dimension-safe (stale-model
+templates score 0.0 rather than crash). Per candidate identity, **two independent signals**
+must clear the operating threshold T:
+
+- `mean_score` — query vs the user's normalized **mean template** (primary, robust), and
+- `best_sample_score` — query vs the user's best individual enrollment sample (sanity check).
+
+Top-1 qualifies only if **both** pass; ranking uses the mean score; and if top-1 and top-2 both
+qualify within `MATCHER_AMBIGUITY_MARGIN` (0.02), the result is **rejected as ambiguous**
+rather than guessed. These rules remove the max-of-noisy-scores inflation that originally let
+unregistered palms slip through at 0.80.
+
+### Stage 8 — Multi-frame fusion (`/api/recognize`)
+POS sends a burst of up to `FUSION_WINDOW`=4 frames (~220 ms apart). Decision requires:
+
+1. the fused **mean query embedding** matches per Stage 7, **and**
+2. at least `FUSION_MIN_PASS_FRAMES`=3 of 4 frames individually clear T.
+
+Otherwise the response carries `match_reason: unstable_capture` and the POS retries
+automatically. Legacy single-image requests degrade gracefully (require 1/1).
+
+### Threshold calibration policy (`core/evaluation.py`, `/test` page)
+T is **never guessed**. `/test` cross-matches all enrolled samples (genuine pairs vs impostor
+pairs), reports distributions, a 0→1 sweep (step 0.02), EER estimate, and suggests the
+operating point under the strict payment rule:
+
+> **Highest T with ZERO observed impostor accepts while GAR ≥ 90%.**
+
+Target margins before demo sign-off: `T − impostor_max ≥ 0.05` and `genuine_min − T ≥ 0.03`.
+The current default **0.78 is an uncalibrated placeholder**.
 
 ---
 
-## 6. Biometric Recognition Pipeline
+## 4. Automated Enrollment (`/enroll`)
 
-### Step 1: Hand Landmark Detection
-- Frame is passed to MediaPipe `HandLandmarker`.
-- 21 landmarks are located in pixel space.
+Fingerprint-setup style — the user never clicks per-sample:
 
-### Step 2: Palm ROI Extraction & Affine Normalization (`core/roi.py`)
-- **Anchors:** Wrist $P_0$, Index MCP $P_5$, Middle MCP $P_9$, Pinky MCP $P_{17}$.
-- **Palm Center:** $C = 0.45 \cdot P_0 + 0.55 \cdot \left(\frac{P_5 + P_{17}}{2}\right)$
-- **Orientation Vector:** $\vec{v} = P_9 - P_0 = (dx, dy)$
-- **Rotation Angle:** $\theta = \text{atan2}(dy, dx) - 90^\circ$
-- **Scale:** $S = \max(\|P_5 - P_{17}\|, \|\vec{v}\| \cdot 0.75) \cdot 1.05$
-- **Affine Warping:** Rotates and crops the palm area into a standardized $128 \times 128$ px square image, ensuring scale and rotation invariance.
+1. Enter name + USN → **🚀 Start Enrollment Scan** (camera opens only for the scan).
+2. A 400 ms probe loop sends low-quality preview frames to `/api/process_frame`; the quality
+   gate's messages coach positioning live ("move closer", "too blurry").
+3. When aligned + quality-passed, a high-quality (JPEG q=0.92) frame is auto-captured;
+   **1.3 s cooldown**, then the next prompt appears.
+4. **Condition script** (6 samples): neutral baseline → tilt LEFT → tilt RIGHT → move closer →
+   turn palm **toward the light** → tip top of hand **away from camera**. Lighting and pitch
+   entries directly target the room→hall generalization failure.
+5. **Near-duplicate guard:** each candidate is diffed against the previous sample on a 32×32
+   grayscale snapshot (< 1.5% mean-abs difference ⇒ skipped with "vary a bit more").
+6. Auto-submit to `/api/enroll` → wallet auto-created → done.
 
-### Step 3: Preprocessing (`core/preprocessing.py`)
-- Grayscale conversion (Luminance).
-- Mild Gaussian smoothing ($\sigma=0.5$).
-- CLAHE with `clipLimit=2.0` and `tileGridSize=(8, 8)` to enhance fine palm creases.
-
-### Step 4: Multi-Block Uniform LBP Feature Extraction (`core/features.py`)
-- $LBP_{8,1}^{u2}$ coded representation with 59 uniform bins.
-- $4 \times 4$ spatial grid division ($16 \text{ blocks} \times 59 \text{ bins} = 944 \text{ dimensions}$).
-- Local block $L_2$ normalization + Global unit $L_2$ normalization:
-  $$\|\mathbf{v}\|_2 = 1.0, \quad \mathbf{v} \in \mathbb{R}^{944}$$
-
-### Step 5: 1:N Cosine Similarity Matching (`core/matcher.py`)
-- Cosine similarity between query vector $\mathbf{q}$ and stored template $\mathbf{t}$:
-  $$\text{Sim}(\mathbf{q}, \mathbf{t}) = \frac{\mathbf{q} \cdot \mathbf{t}}{\|\mathbf{q}\|_2 \|\mathbf{t}\|_2} = \mathbf{q} \cdot \mathbf{t}$$
-- Compares against all enrolled user samples in the SQLite database.
-- Decision rule: If $\max(\text{Sim}) \ge \text{Threshold}$, user is **Recognized**; otherwise **Unknown Palm**.
+Config: `DEFAULT_ENROLLMENT_SAMPLES=6` (min 3 / max 8), `ENROLL_CAPTURE_COOLDOWN_MS`,
+`ENROLL_POSE_PROMPTS`, `ENROLL_DUPLICATE_DIFF_PCT`.
 
 ---
 
-## 7. Threshold Selection Methodology & Calibration
+## 5. Payment System (Demo / Prototype)
 
-> [!IMPORTANT]
-> The default recognition threshold ($\theta = 0.78$) is an **initial experimental default**, not an academically proven constant. Threshold calibration must be conducted empirically on actual samples collected on the target camera and lighting setup.
+### Security model
+- **Merchant-side POS only.** Customers never operate a device to pay.
+- After a successful match, the backend stores the identity in a **server-side session store**
+  (`bio_session.py`) keyed by an opaque token held in the browser's Flask session cookie.
+  **30 s TTL · single-use** (burned on successful payment) · invalidated by any failed scan.
+- `/api/payment` resolves the payer **only** from that session — a client-sent `user_id` is
+  ignored (regression-tested).
+- Amount validated server-side: numeric, > 0, ≤ ₹5000. Failure paths are audit-logged
+  (`FAILED_AMOUNT`, `FAILED_BALANCE`); unknown identities log nothing.
 
-### How to Calibrate:
-1. Navigate to `/test` (Evaluation & Test page).
-2. Click **Run Evaluation** to compute cross-comparison scores across all enrolled users.
-3. Inspect the **Genuine** (same user) vs **Impostor** (different users) score distributions.
-4. Review the threshold sweep table to locate the **Equal Error Rate (EER)** point where $\text{FAR} \approx \text{FRR}$.
-5. Use the interactive threshold slider to adjust the operational threshold, then click **Apply Threshold** or **Use Suggested EER**.
+### Flows
+| Actor | Flow |
+|---|---|
+| Merchant | `/merchant?merchant_id=m1&view=pos` or standalone `/pay` → pick store, enter amount, Start Payment → customer palm → auto-debit → success screen + receipt link. Camera lives only while the sale is active. |
+| Consumer | `/consumer?user_id=N` — read-only wallet: balance, history, **top-up request** (admin-approved). No pay button anywhere. |
+| Merchant cash-out | Console tab → request → logged `PENDING` until admin approves (simulated settlement). |
+| Admin | `/admin/login` (`admin` / `palmpay2025` demo cred): direct top-ups, approve consumer top-up requests, approve cash-outs, system stats. |
+
+Ledger: every transaction row records type (PAYMENT/TOPUP/CASHOUT), status, amount, parties,
+and the **biometric score** — this log is the pilot-phase evaluation dataset (data flywheel).
 
 ---
 
-## 8. Installation & Setup
+## 6. Research Basis & References
 
-### Prerequisites
-- Windows 10 or 11
-- Python 3.10+ (tested on Python 3.11 / 3.13)
-- USB / Built-in RGB Webcam
+1. **Zhang, D., Kong, W.-K., You, J., & Wong, M. (2003).** *Online palmprint identification.*
+   IEEE Transactions on Pattern Analysis and Machine Intelligence, 25(9), 1041–1050.
+   → Establishes palmprint (principal lines, wrinkles, ridges) as a distinct biometric modality.
+2. **Ojala, T., Pietikäinen, M., & Mäenpää, T. (2002).** *Multiresolution gray-scale and rotation
+   invariant texture classification with local binary patterns.* IEEE TPAMI, 24(7), 971–987.
+   → The $LBP_{P,R}^{u2}$ operator and its multiresolution extension — basis for our R=(1,2)
+   concatenation and the 59-bin uniform mapping (>90% of texture energy lands in uniform patterns).
+3. **Zhang, L., Chu, R., Xiang, S., Liao, S., & Li, S. Z. (2007).** *Face Detection Based on
+   Multi-Block LBP Representation.* International Conference on Biometrics (ICB).
+   → Block-wise LBP histograms (our 4×4 spatial grid) capture coarse structure while staying
+   robust to micro-pose noise.
+4. **Amrouni, M., et al. (2022).** *Contactless palmprint preprocessing and recognition.*
+   Journal of Biometrics.
+   → CLAHE on contactless ROIs enhances principal lines under variable ambient illumination.
+5. **Zhang, F., Bazarevsky, V., Vakunov, A., et al. (2020).** *MediaPipe Hands: On-device
+   real-time hand tracking.* arXiv:2006.10214.
+   → Real-time 21-landmark estimation on CPU; provides our geometric anchor points.
+6. **Sánchez-Brizuela, G., et al. (2023).** *Landmark-based geometric normalization for
+   contactless hand/palm biometric systems.* Sensors.
+   → Wrist→middle-MCP axis formulation for rotation/scale-invariant ROI extraction.
+7. **Zhang, D., Guo, Z., Lu, G., Zhang, L., & Wang, Y. (2010).** *Online finger-knuckle-print
+   verification for personal authentication.* Pattern Recognition, 43(4).
+   → Scientific grounding for the Phase-3 multi-modal roadmap item (palmprint +
+   knuckle-print fusion); knuckle texture is RGB-camera-friendly unlike dorsal veins (NIR).
 
-### 1. Set Up Virtual Environment
+### Why not deep learning yet?
+Public palmprint models (CCNet, PalmNet, CompCode variants, ViTs) ship without turnkey
+pretrained embeddings for unconstrained webcam input, and would require training data we don't
+have pre-pilot. The classical MB-uLBP baseline is literature-standard, fully explainable
+(viva-friendly), runs in <100 ms on an i3, and the pilot's score logs become the training set
+for the planned deep-embedding swap behind the same `BasePalmModel` interface (see ROADMAP
+Phase 2). This is a deliberate sequencing decision, not a limitation of ambition.
+
+---
+
+## 7. Installation & Running
+
+### Linux (dev machine — managed via mise)
+```bash
+mise exec python@3.11 -- python -m venv .venv      # create once (gitignored)
+.venv/bin/pip install -r requirements.txt          # deps ONLY inside .venv
+.venv/bin/python app.py                            # http://127.0.0.1:5000
+```
+
+### Windows (target demo laptop)
 ```powershell
-cd C:\Users\night\.gemini\antigravity\scratch\palmpay
 python -m venv .venv
 .venv\Scripts\activate
-```
-
-### 2. Install Dependencies
-```powershell
 pip install -r requirements.txt
+python app.py                                      # http://127.0.0.1:5000
 ```
 
-### 3. Run Pipeline Verification Test
-```powershell
-python scripts/demo_pipeline_test.py
-```
+Server flags live in `config.py` (`SERVER_HOST`, `SERVER_PORT`, debug ON, reloader OFF —
+restart manually after edits).
 
-### 4. (Optional) Seed Sample Dataset for Evaluation
-```powershell
-python scripts/seed_demo_dataset.py
-```
-
-### 5. Run Unit & Integration Tests
-```powershell
-python -m unittest discover tests
+### Utilities
+```bash
+python -m unittest discover tests          # 54 tests — must stay green after ANY change
+python scripts/verify_demo_script.py       # 13-step end-to-end demo rehearsal (pipeline mocked)
+python scripts/reset_biometrics.py --yes   # wipe biometric users/templates, PRESERVES merchants
+python scripts/seed_demo_dataset.py        # synthetic templates for offline evaluation testing
+python scripts/demo_pipeline_test.py       # visual pipeline stage dump (needs webcam)
+node --check static/js/enroll.js           # JS syntax gate after editing any controller
 ```
 
 ---
 
-## 9. Running the Application
+## 8. How-To: Every User Journey
 
-Start the Flask application server:
-```powershell
-python app.py
-```
-Open your browser and navigate to:
-```
-http://127.0.0.1:5000
-```
+### First-time setup checklist (demo venue)
+1. Mount laptop + small fixed LED light at the counter (consistency beats any camera upgrade).
+2. Start server; open `/enroll`; enroll operators first, then volunteers — follow the prompts.
+3. **Enroll your other hand as a decoy user** (it becomes the impostor test subject).
+4. `/test` → Run Evaluation → read genuine_min vs impostor_max → **Use Suggested → Apply
+   Threshold**.
+5. Acceptance: decoy rejected 10/10 at `/pay`; every registered palm pays; wrong palms bounce.
 
-### Pages Overview:
-- `/` : **Overview** — System status, architecture diagram, literature citations.
-- `/enroll` : **Enrollment** — Capture 4 palm samples per user and store template in SQLite.
-- `/recognize` : **Recognition** — Real-time live 1:N palm authentication HUD with latency breakdown.
-- `/users` : **Enrolled Users** — View enrolled subjects, template counts, and manage records.
-- `/test` : **Evaluation & Calibration** — Empirical cross-matching, FAR/FRR/GAR tables, EER, and CSV download.
+### Daily demo flow
+Top-up consumers (admin) → merchant opens POS tab → sale → palm → green screen → receipt →
+show dashboards → deliberately fail a scan (wrong palm) → low-balance orange screen →
+merchant cash-out request → admin approval.
 
----
-
-## 10. Verification vs. Experimental Findings
-
-### What Has Been Verified:
-- [x] End-to-end execution of `Frame -> MediaPipe -> Palm ROI -> CLAHE -> 944-D LBP` on CPU.
-- [x] Multi-sample enrollment and template serialization in SQLite.
-- [x] 1:N Cosine similarity matching and configurable threshold updates via REST API.
-- [x] All 13 automated unit and API integration tests passing cleanly.
-- [x] Clean, responsive, accessible web GUI without external CDN dependencies.
-
-### What Remains for Experimental Evaluation:
-- Evaluation of Genuine Acceptance Rate (GAR) and False Acceptance Rate (FAR) under varying ambient room illuminations.
-- Hand pose variation experiments (distance, pitch, yaw) across 20+ distinct subjects.
-- Final threshold calibration for the specific campus cafeteria lighting environment.
+### Recalibrating later
+Whenever several new users enroll (rule of thumb: ~every 10× cohort growth), re-run `/test`
+and apply the fresh suggested threshold. Never hand-tune T against intuition.
 
 ---
 
-## 11. Known Limitations (Phase 1)
+## 9. Page & API Map
 
-1. **Ambient Illumination Sensitivity:** Standard RGB cameras lack the active illumination of NIR (near-infrared) sensors. Deep shadows or harsh direct backlighting may degrade crease contrast.
-2. **Liveness / Spoofing:** Phase 1 does not implement 3D depth or liveness detection. Printed photos or 2D screen replays are not rejected in this phase.
-3. **No Payment/Cloud Backend:** Digital wallets, merchant accounts, and Firebase/Firestore integration are deferred to future project phases.
+**Pages:** `/` overview · `/enroll` auto-scan · `/recognize` legacy live HUD · `/users`
+management · `/test` evaluation/calibration · `/consumer?user_id=` mobile wallet · `/pay`
+standalone POS · `/merchant?merchant_id=&view=dashboard|pos|transactions|cashout` console ·
+`/transactions?role=&user_id=` shared history · `/receipt/<uuid>` · `/admin(/login|dashboard|
+topup|cashouts)`.
+
+**APIs:** biometric — `POST /api/process_frame`, `POST /api/enroll`, `POST /api/recognize`
+(single image or burst), `GET/POST /api/config` (threshold), `POST /api/evaluate`,
+`GET /api/users…`. Payment — `POST /api/payment`, `POST /api/topup`,
+`POST /api/topup/request` (+ `/approve`), `POST /api/cashout` (+ `/approve`),
+`GET /api/wallet/<id|m1..m4>`, `GET /api/transactions[?]`, `GET /api/transactions/export`,
+`GET /api/merchant/stats/<mid>`.
+
+**DB schema highlights:** `users(usn UNIQUE)` · `templates(feature_blob, feature_dim,
+model_name)` — loader serves **only** rows matching the active model, so model upgrades
+invalidate old templates safely · `wallets(role CHECK, balance)` · `transactions(UUID PK,
+status CHECK, biometric_score, note-as-type)` · `cashout_requests` / `topup_requests(PENDING→APPROVED)`.
 
 ---
 
-## 12. Future Project Roadmap
+## 10. Verified vs Pending
 
-- **Phase 2:** Cloud database migration (Firestore), user authentication, and wallet ledger schema.
-- **Phase 3:** Cafeteria Point-of-Sale (POS) integration, transaction history, and receipt dispatch.
-- **Phase 4:** Contactless liveness detection (blink/pulse photoplethysmography or micro-motion analysis) and deep fine-tuned palmprint embedding models.
+**Verified (code-level):**
+- [x] End-to-end pipeline on CPU: frame → landmarks → ROI → CLAHE → mask → 1888-D LBP → match
+- [x] Quality-gate rejection paths with live coaching messages
+- [x] Finger-mask geometry (pure-function unit tests incl. byte-exactness below the cut)
+- [x] Hardened matcher semantics (dual-pass, ambiguity guard, dimension safety)
+- [x] 4-frame fusion agreement counting + `unstable_capture` path
+- [x] Payment ledger atomicity, session gating, IDOR-resistance (payer from server session)
+- [x] 54/54 automated tests · 13-step demo script green
+
+**Pending (empirical, on real palms):**
+- [ ] Genuine/impostor distributions on the upgraded extractor — the motivating incidents
+      (left palm accepted @0.80; room→hall failures; spread-finger sensitivity) have
+      structural fixes shipped but **not yet validated with human subjects**
+- [ ] Operating-threshold calibration + baked-in config value
+- [ ] Cross-condition GAR/FAR across ≥10 subjects at the actual venue lighting
+
+---
+
+## 11. Known Limitations (state honestly — also viva material)
+
+1. **Illumination sensitivity mitigated, not solved.** RGB + classical features remain
+   environment-sensitive. Mitigations shipped: quality gate, diversity-scripted enrollment,
+   finger masking. Definitive fixes (NIR sensor / learned invariant embeddings) are ROADMAP
+   Phases 2–3. Interim policy: **enroll where you pay.**
+2. **No liveness/anti-spoofing.** A printed photo may still authenticate. Challenge-response
+   liveness is a Phase-2 item; treat terminals as attended in the demo.
+3. **Small-cohort statistics.** Thresholds calibrated on few subjects generalize weakly;
+   recalibrate as the cohort grows.
+4. **Security floor deferred by agreement** (documented in ROADMAP Phase 1): merchant terminal
+   auth, consumer PIN binding, rate limiting, HTTPS/secrets management. Acceptable only
+   because the system holds no real money.
+5. **Privacy posture:** raw images never stored; only unit-norm float32 embeddings — note
+   embeddings are still biometric data and Phase 2 plans cancelable templates + encryption.
