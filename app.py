@@ -14,10 +14,13 @@ from flask import Flask, Response, jsonify, redirect, render_template, request, 
 
 import config
 from database.db import Database
+from core.geometry import enrollment_consistency_distances
 from core.pipeline import BiometricPipeline
 from core.matcher import PalmMatcher
 from core.evaluation import EvaluationEngine
 from bio_session import BiometricSessionStore
+from core.liveness import LivenessSessionStore, LandmarkLivenessDetector
+from core.cpp_bridge import native_status, verify_liveness_native_or_fallback
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "palmpay-dev-secret-key"
@@ -32,6 +35,9 @@ evaluation_engine = EvaluationEngine(matcher=matcher)
 # a successful /api/recognize match creates a short-lived authenticated
 # session here; /api/payment resolves the payer from it — never from the request body.
 biometric_sessions = BiometricSessionStore(ttl_seconds=config.BIOMETRIC_SESSION_TTL_SECONDS)
+
+# Phase-2 Server-side liveness store
+liveness_sessions = LivenessSessionStore(ttl_seconds=getattr(config, "LIVENESS_TOKEN_TTL_S", 30))
 
 
 def ensure_merchant_accounts():
@@ -132,8 +138,8 @@ def index():
         "index.html",
         stats=stats,
         threshold=matcher.threshold,
-        model_name=config.MODEL_NAME,
-        feature_dim=config.FEATURE_VECTOR_DIM,
+        model_name=pipeline.model.get_model_name(),
+        feature_dim=pipeline.model.get_feature_dim(),
     )
 
 
@@ -156,7 +162,7 @@ def recognize_page():
         "recognize.html",
         threshold=matcher.threshold,
         user_count=stats["total_users"],
-        model_name=config.MODEL_NAME,
+        model_name=pipeline.model.get_model_name(),
     )
 
 
@@ -506,6 +512,45 @@ def api_payment():
     # 2. Payer comes strictly from the server-side session (never request body).
     sender_user_id = bio["user_id"]
 
+    # Phase-2 Optional Liveness Enforcement
+    liveness_token = data.get("liveness_token") or session.get("liveness_token")
+    liveness_score = None
+    liveness_status = None
+
+    if getattr(config, "PAYMENT_REQUIRES_LIVENESS", False):
+        if not liveness_token:
+            return jsonify(
+                {
+                    "success": False,
+                    "reason": "LIVENESS_MISSING",
+                    "liveness_missing": True,
+                    "message": "Payment requires completed challenge-response liveness verification.",
+                }
+            ), 403
+        
+        valid_live, live_score, live_reason = liveness_sessions.verify_and_consume_token(liveness_token)
+        session.pop("liveness_token", None)
+        if not valid_live:
+            reason_code = "LIVENESS_EXPIRED" if live_reason == "liveness_expired" else "LIVENESS_INVALID"
+            return jsonify(
+                {
+                    "success": False,
+                    "reason": reason_code,
+                    "liveness_expired": (live_reason == "liveness_expired"),
+                    "liveness_consumed": (live_reason == "liveness_consumed_or_invalid"),
+                    "message": f"Liveness verification failed ({live_reason}). Please re-verify.",
+                }
+            ), 403
+        liveness_score = live_score
+        liveness_status = "PASSED"
+    elif liveness_token:
+        # If liveness was performed optionally, consume and record it
+        valid_live, live_score, _ = liveness_sessions.verify_and_consume_token(liveness_token)
+        session.pop("liveness_token", None)
+        if valid_live:
+            liveness_score = live_score
+            liveness_status = "PASSED"
+
     # 5.-9. Balance fetch + atomic debit/credit + transaction record.
     pay_res = db.process_payment(
         sender_user_id=sender_user_id,
@@ -513,6 +558,8 @@ def api_payment():
         merchant_name=merchant["name"],
         amount=amount,
         biometric_score=bio["score"],
+        liveness_score=liveness_score,
+        liveness_status=liveness_status,
     )
 
     if pay_res["status"] == "SUCCESS":
@@ -531,6 +578,8 @@ def api_payment():
                 "merchant": {"id": merchant["merchant_id"], "name": merchant["name"]},
                 "amount": pay_res["amount"],
                 "biometric_score": bio["score"],
+                "liveness_score": liveness_score,
+                "liveness_passed": (liveness_status == "PASSED"),
             }
         )
 
@@ -931,6 +980,8 @@ def api_enroll():
         )
 
     extracted_embeddings = []
+    extracted_geometries = []
+    extracted_rois = []
     latencies = []
 
     for idx, s_b64 in enumerate(samples_b64):
@@ -952,23 +1003,109 @@ def api_enroll():
                 ),
                 400,
             )
+        if config.GEO_ENABLED and res.get("geometry") is None:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": f"Sample #{idx + 1} failed hand-geometry extraction. Please retake the scan.",
+                    }
+                ),
+                400,
+            )
 
         extracted_embeddings.append(res["embedding"])
+        extracted_rois.append(res.get("roi_enhanced"))
+        if config.GEO_ENABLED:
+            extracted_geometries.append(res["geometry"])
         latencies.append(res["latency_ms"])
+
+    # Enrollment pose-consistency gate (Accuracy Sprint v4): drop samples whose
+    # hand geometry deviates too far from the enrollment's median sample, so the
+    # stored template describes a flat, repeatable pose envelope. Texture and
+    # geometry are always dropped as a PAIR to keep sample indices aligned.
+    if config.GEO_ENABLED and len(extracted_geometries) >= config.MIN_ENROLLMENT_SAMPLES:
+        consistency = enrollment_consistency_distances(extracted_geometries)
+        kept_idx = [
+            i for i, d in enumerate(consistency)
+            if d <= config.ENROLL_GEO_CONSISTENCY_MAX_DIST
+        ]
+        if len(kept_idx) < config.MIN_ENROLLMENT_SAMPLES:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": (
+                            "Palm pose was too inconsistent across samples. "
+                            "Keep the palm FLAT, fingers spread, and rescan."
+                        ),
+                    }
+                ),
+                400,
+            )
+        extracted_embeddings = [extracted_embeddings[i] for i in kept_idx]
+        extracted_geometries = [extracted_geometries[i] for i in kept_idx]
+        extracted_rois = [extracted_rois[i] for i in kept_idx]
+
+    # Single source of truth for active model identity & dimension
+    active_model_name = pipeline.model.get_model_name()
+    active_feature_dim = pipeline.model.get_feature_dim()
 
     # Create user in database
     user_id = db.add_user(name, usn)
     if not user_id:
         return jsonify({"success": False, "message": "Failed to create user record in database."}), 500
 
-    # Store templates
-    db_success = db.add_templates(user_id, extracted_embeddings, model_name=config.MODEL_NAME)
+    # Store templates with active model identity
+    db_success = db.add_templates(user_id, extracted_embeddings, model_name=active_model_name)
     if not db_success:
         db.delete_user(user_id)
         return jsonify({"success": False, "message": "Failed to save biometric templates."}), 500
 
+    # Store hand-geometry templates (Accuracy Sprint v4)
+    if config.GEO_ENABLED and extracted_geometries:
+        if not db.add_geometry_templates(user_id, extracted_geometries):
+            db.delete_user(user_id)
+            return jsonify({"success": False, "message": "Failed to save hand-geometry templates."}), 500
+
     # Payment system (demo): every enrolled consumer gets a wallet automatically.
     db.ensure_wallet(user_id, "CONSUMER")
+
+    # Phase-2 Training Pipeline: Consent-gated ephemeral ROI dataset capture
+    # If DATASET_CAPTURE_ENABLED=True AND client gave explicit consent, persist
+    # the 128x128 CLAHE enhanced ROI crops and metadata to disk.
+    dataset_saved_count = 0
+    if getattr(config, "DATASET_CAPTURE_ENABLED", False) and data.get("dataset_consent", False):
+        try:
+            import json
+            import cv2
+            out_dir = getattr(config, "DATASET_DIR", os.path.join(config.BASE_DIR, "data", "pilot_rois"))
+            user_dir = os.path.join(out_dir, f"user_{user_id}_{usn}")
+            os.makedirs(user_dir, exist_ok=True)
+            
+            prompts = list(config.ENROLL_POSE_PROMPTS)
+            for idx, roi in enumerate(extracted_rois):
+                if roi is not None and roi.size > 0:
+                    sample_fname = f"sample_{idx + 1:02d}.png"
+                    cv2.imwrite(os.path.join(user_dir, sample_fname), roi)
+                    meta_fname = f"sample_{idx + 1:02d}.json"
+                    prompt_txt = "neutral baseline" if idx == 0 else (prompts[(idx - 1) % len(prompts)] if prompts else "varied")
+                    meta = {
+                        "user_id": user_id,
+                        "name": name,
+                        "usn": usn,
+                        "sample_index": idx + 1,
+                        "condition_prompt": prompt_txt,
+                        "timestamp": datetime.now().isoformat(),
+                        "roi_size": [roi.shape[1], roi.shape[0]],
+                        "finger_masked": True
+                    }
+                    with open(os.path.join(user_dir, meta_fname), "w", encoding="utf-8") as mf:
+                        json.dump(meta, mf, indent=2)
+                    dataset_saved_count += 1
+        except Exception as exc:
+            # Ephemeral dataset capture failure must NEVER break user enrollment
+            print(f"[PalmPay Dataset Capture] Warning: failed to save pilot ROIs: {exc}")
 
     avg_latency = round(sum(latencies) / len(latencies), 2) if latencies else 0.0
 
@@ -980,8 +1117,10 @@ def api_enroll():
             "name": name,
             "usn": usn,
             "sample_count": len(extracted_embeddings),
-            "model_name": config.MODEL_NAME,
-            "feature_dim": config.FEATURE_VECTOR_DIM,
+            "geometry_count": len(extracted_geometries),
+            "dataset_captured": dataset_saved_count,
+            "model_name": active_model_name,
+            "feature_dim": active_feature_dim,
             "avg_extraction_latency_ms": avg_latency,
         }
     )
@@ -1077,10 +1216,18 @@ def api_recognize():
     norm = float(np.linalg.norm(mean_query))
     mean_query = mean_query / norm if norm > 1e-7 else stacked[0]
 
+    # Step 2b: Fuse hand-geometry features (Accuracy Sprint v4).
+    geo_vectors = [f["geometry"] for f in ok_frames if f.get("geometry") is not None]
+    query_geometry = (
+        np.mean(np.stack(geo_vectors, axis=0), axis=0).astype(np.float32)
+        if config.GEO_ENABLED and geo_vectors
+        else None
+    )
+
     # Step 3: Hardened matching on the fused query + per-frame agreement count.
     t_match_start = time.perf_counter()
     enrolled_users = db.get_all_users_with_templates()
-    match_res = matcher.match_1_to_n(mean_query, enrolled_users)
+    match_res = matcher.match_1_to_n(mean_query, enrolled_users, query_geometry=query_geometry)
     frames_above = sum(
         1 for f in ok_frames
         if matcher.frame_pass_score(f["embedding"], enrolled_users) >= matcher.threshold
@@ -1143,6 +1290,11 @@ def api_recognize():
             "frames_above_threshold": frames_above,
             "fusion_min_frames_required": min_frames_required,
             "match_reason": match_res.get("reason"),
+            "geo_distance": match_res.get("geo_distance"),
+            "geo_threshold": match_res.get("geo_threshold"),
+            "liveness_required": bool(getattr(config, "PAYMENT_REQUIRES_LIVENESS", False)),
+            "liveness_passed": session.get("liveness_token") is not None,
+            "liveness_score": session.get("liveness_score"),
             "message": match_res["message"],
         }
     )
@@ -1201,8 +1353,8 @@ def api_config():
     return jsonify(
         {
             "threshold": matcher.threshold,
-            "model_name": config.MODEL_NAME,
-            "feature_dim": config.FEATURE_VECTOR_DIM,
+            "model_name": pipeline.model.get_model_name(),
+            "feature_dim": pipeline.model.get_feature_dim(),
             "roi_size": list(config.ROI_SIZE),
             "clahe_clip_limit": config.CLAHE_CLIP_LIMIT,
             "default_threshold": config.DEFAULT_RECOGNITION_THRESHOLD,
@@ -1210,14 +1362,108 @@ def api_config():
     )
 
 
+@app.route("/api/liveness/start", methods=["POST"])
+def api_liveness_start():
+    """
+    Issues a server-side random challenge sequence for anti-spoofing verification.
+    """
+    challenge = liveness_sessions.create_challenge()
+    return jsonify({"success": True, **challenge})
+
+
+@app.route("/api/liveness/verify", methods=["POST"])
+def api_liveness_verify():
+    """
+    Verifies a burst of landmark frames against the issued challenge sequence.
+    Issues a short-lived single-use liveness token upon success.
+    Never persists raw frames or reveal biometric match.
+    """
+    data = request.get_json(silent=True) or {}
+    challenge_id = data.get("challenge_id")
+    frames = data.get("frames") or []
+
+    ch = liveness_sessions.consume_challenge(challenge_id)
+    if not ch:
+        return jsonify(
+            {
+                "success": False,
+                "status": "failed",
+                "score": 0.0,
+                "reasons": ["challenge_expired_or_invalid"],
+                "message": "Liveness challenge is invalid or has expired. Please restart.",
+            }
+        ), 400
+
+    expected_sequence = ch["sequence"]
+
+    # If incoming frames contain base64 image without precomputed landmarks, extract them safely:
+    parsed_frames = []
+    for f in frames:
+        if isinstance(f, dict):
+            lms = f.get("landmarks")
+            if lms is not None and len(lms) >= 21:
+                parsed_frames.append(f)
+            elif f.get("image"):
+                img_bgr = pipeline.decode_base64_to_image(f["image"])
+                if img_bgr is not None:
+                    det = pipeline.hand_detector.detect(img_bgr)
+                    if det.get("detected"):
+                        parsed_frames.append({
+                            "ts_ms": f.get("ts_ms", 0),
+                            "landmarks": det.get("landmarks_pixel", [])
+                        })
+
+    # Verify using native acceleration if enabled, or Python fallback
+    verif = verify_liveness_native_or_fallback(parsed_frames, expected_sequence)
+
+    if verif.get("passed"):
+        token = liveness_sessions.issue_token(verif.get("score", 1.0))
+        # Store in session cookie as well for seamless browser UX
+        session["liveness_token"] = token
+        session["liveness_score"] = verif.get("score", 1.0)
+        return jsonify(
+            {
+                "success": True,
+                "status": "passed",
+                "score": verif.get("score", 1.0),
+                "reasons": verif.get("reasons", ["ok"]),
+                "liveness_token": token,
+                "expires_in_s": config.LIVENESS_TOKEN_TTL_S,
+                "message": "Liveness verification passed.",
+            }
+        )
+
+    return jsonify(
+        {
+            "success": False,
+            "status": "failed",
+            "score": verif.get("score", 0.0),
+            "reasons": verif.get("reasons", ["gesture_mismatch"]),
+            "message": "Liveness verification failed. Please follow the instructions and try again.",
+        }
+    ), 400
+
+
+@app.route("/api/native/status", methods=["GET"])
+def api_native_status():
+    """Reports status of the optional C++ native acceleration core."""
+    return jsonify(native_status())
+
+
 @app.route("/api/evaluate", methods=["POST"])
 def api_evaluate():
     """
     Executes empirical biometric evaluation across enrolled templates.
     Computes genuine vs impostor scores, GAR, FAR, FRR, and suggested threshold.
+    Supports evaluating deep models separately if requested via body {model_name, feature_dim}.
     """
-    users_data = db.get_all_users_with_templates()
+    data = request.get_json(silent=True) or {}
+    model_override = data.get("model_name")
+    dim_override = data.get("feature_dim")
+
+    users_data = db.get_all_users_with_templates(model_name=model_override, feature_dim=dim_override)
     eval_result = evaluation_engine.evaluate_enrolled_dataset(users_data)
+    eval_result["evaluated_model"] = model_override or (config.DEEP_MODEL_NAME if getattr(config, "DEEP_ENABLED", False) else config.MODEL_NAME)
     return jsonify(eval_result)
 
 

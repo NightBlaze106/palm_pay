@@ -15,10 +15,12 @@ Goal: protect against catastrophic failure in front of an audience.
 - [x] Zero-FAR decision policy: dual mean/best-sample match, ambiguity guard, 3/4-frame fusion
 - [x] Capture quality gate (blur / glare / brightness / palm-span)
 - [x] Finger masking above knuckle line (`MB-uLBP2R-CLAHE-v2-fm`)
-- [x] Condition-scripted auto-enrollment (6 samples: neutral → tilt L/R → closer → light → pitch)
-- [ ] Enroll AT the venue + fixed clip-on light at demo station
-- [ ] Calibrate threshold on real palms via `/test` (strict `zero_far_gar_ge_90pct` policy), apply
-- [ ] Acceptance: unregistered palms rejected 10/10; registered users ≥90% pass; full payment loop <8s
+- [x] Condition-scripted auto-enrollment (6 samples: neutral → tilt L/R → closer → same-spread → flat-palm)
+- [x] Hand-geometry fusion channel (`handgeo-v1`, AND-rule) — texture alone measured unsafe
+- [x] Enrollment pose-consistency gate (absolute-unit outlier rejection, pitch prompt removed)
+- [ ] Enroll AT the venue + fixed clip-on light at demo station (flat-palm cohort, one sitting)
+- [ ] Final calibration: `GEO_MAX_DIST` + T via `/api/evaluate` strict zero-FAR policy, apply
+- [ ] Acceptance: unregistered palms AND decoy left hand rejected 10/10; registered users ≥90% pass; full payment loop <8s
 
 **Explicitly not building:** dorsal/knuckle surface, deep learning, liveness (→ Phase 2/3).
 

@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 import config
+from core.geometry import extract_geometry_features
 from core.hand_detector import HandDetector
 from core.roi import PalmROIExtractor
 from core.preprocessing import PalmPreprocessor
@@ -157,6 +158,18 @@ class BiometricPipeline:
         self.model = get_palm_model()
         self.quality_gate = FrameQualityGate()
 
+    def reload_model(self):
+        """Reloads the active palm biometric model according to current configuration."""
+        self.model = get_palm_model()
+        return self.model
+
+    def _sync_model(self):
+        """Ensures self.model reflects current config.DEEP_ENABLED state."""
+        from core.palm_model import DeepPalmModel
+        is_deep = getattr(config, "DEEP_ENABLED", False)
+        if (is_deep and not isinstance(self.model, DeepPalmModel)) or (not is_deep and isinstance(self.model, DeepPalmModel)):
+            self.reload_model()
+
     @staticmethod
     def encode_image_to_base64(image_array: np.ndarray, format_ext: str = ".jpg") -> str:
         """Converts an OpenCV image array to a base64 data URI string."""
@@ -203,6 +216,8 @@ class BiometricPipeline:
                 - roi_extracted: bool
                 - roi_polygon: list of (x, y) coordinates
                 - embedding: np.ndarray (FEATURE_VECTOR_DIM,) or None
+                - geometry: np.ndarray (GEO_FEATURE_DIM,) or None (hand shape descriptor)
+                - geometry_ok: bool
                 - model_name: str
                 - feature_dim: int
                 - latency_ms: float
@@ -212,6 +227,7 @@ class BiometricPipeline:
                 - message: status explanation
         """
         start_time = time.perf_counter()
+        self._sync_model()
 
         if image_bgr is None or image_bgr.size == 0:
             return {
@@ -251,6 +267,12 @@ class BiometricPipeline:
                 "preview_annotated_b64": "",
                 "message": det_result["message"],
             }
+
+        # Stage 1.5: Hand geometry features (Accuracy Sprint v4).
+        # Landmark-derived shape descriptor — computed whenever a hand is
+        # detected; consumed by the matcher's geometry gate and stored at
+        # enrollment. Independent of ROI/quality stages.
+        geo_result = extract_geometry_features(det_result["landmarks_pixel"])
 
         # Stage 2: Palm ROI Extraction & Affine Normalization
         roi_result = self.roi_extractor.extract_roi(
@@ -373,6 +395,8 @@ class BiometricPipeline:
             "roi_extracted": True,
             "roi_polygon": roi_result["roi_polygon"],
             "embedding": embedding,
+            "geometry": geo_result.get("geometry"),
+            "geometry_ok": bool(geo_result.get("success")),
             "model_name": self.model.get_model_name(),
             "feature_dim": self.model.get_feature_dim(),
             "latency_ms": round(elapsed_ms, 2),
@@ -380,6 +404,7 @@ class BiometricPipeline:
             "quality_metrics": quality["metrics"],
             "finger_mask_applied": bool(finger_mask_info.get("applied")),
             "finger_mask_cut_y": finger_mask_info.get("cut_y"),
+            "roi_enhanced": enhanced_for_features,
             "preview_roi_bgr_b64": preview_roi_b64,
             "preview_enhanced_b64": preview_enhanced_b64,
             "preview_annotated_b64": preview_annotated_b64,

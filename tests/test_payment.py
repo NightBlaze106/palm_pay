@@ -26,6 +26,7 @@ import numpy as np
 
 import config
 import app as flask_app
+from core.geometry import GEO_FEATURE_DIM
 from database.db import Database
 
 
@@ -50,9 +51,13 @@ def _variant(vec: np.ndarray, seed: int, w: float = 0.05) -> np.ndarray:
     return out / np.linalg.norm(out)
 
 
-def _pipeline_result(embedding):
+def _pipeline_result(embedding, geometry=None):
     """Full result dict shaped exactly like core.pipeline.BiometricPipeline.process_frame output."""
     emb = np.asarray(embedding, dtype=np.float32)
+    if geometry is None:
+        # Fixed synthetic hand-geometry vector (20 dims) so the enrollment and
+        # matching paths see a consistent shape across all mocked frames.
+        geometry = np.linspace(0.4, 1.6, GEO_FEATURE_DIM, dtype=np.float32)
     return {
         "success": True,
         "hand_detected": True,
@@ -61,6 +66,8 @@ def _pipeline_result(embedding):
         "roi_extracted": True,
         "roi_polygon": [[0, 0], [1, 0], [1, 1], [0, 1]],
         "embedding": emb,
+        "geometry": np.asarray(geometry, dtype=np.float32),
+        "geometry_ok": True,
         "model_name": config.MODEL_NAME,
         "feature_dim": config.FEATURE_VECTOR_DIM,
         "latency_ms": 1.23,
@@ -156,6 +163,51 @@ class PaymentSystemTests(unittest.TestCase):
         # Merchant accounts must not leak into the biometric user listing.
         biometric_names = [u["usn"] for u in self.db.get_all_users_with_templates()]
         self.assertFalse(any(u.startswith(config.MERCHANT_USN_PREFIX) for u in biometric_names))
+
+    def test_enrollment_geometry_consistency_gate(self):
+        """Wild-geometry samples are dropped; all-wild enrollments are rejected."""
+        name = "Consistency Carol"
+        usn = self._unique_usn()
+        base_geo = np.linspace(0.4, 1.6, GEO_FEATURE_DIM, dtype=np.float32)
+        wild_geo = base_geo + 5.0  # far outside any sane pose envelope
+
+        results = [
+            _pipeline_result(_variant(_unit_vec(21), i)) for i in range(4)
+        ]
+        results[2]["geometry"] = wild_geo.copy()
+
+        with patch("app.pipeline.process_frame", side_effect=results):
+            resp = self.client.post(
+                "/api/enroll",
+                data=json.dumps({"name": name, "usn": usn, "samples": [self._img] * 4}),
+                content_type="application/json",
+            )
+        data = json.loads(resp.data)
+        self.assertTrue(data["success"], data)
+        self.assertEqual(data["sample_count"], 3)  # wild sample dropped
+        self.assertEqual(data["geometry_count"], 3)
+        uid = self._track_user(usn)
+        stored = self.db.get_all_users_with_templates()
+        geo_counts = {u["id"]: len(u["geometry"]) for u in stored}
+        self.assertEqual(geo_counts.get(uid), 3)
+
+    def test_enrollment_rejected_when_all_samples_inconsistent(self):
+        name = "Inconsistent Ivan"
+        usn = self._unique_usn()
+        base_geo = np.linspace(0.4, 1.6, GEO_FEATURE_DIM, dtype=np.float32)
+        results = [
+            _pipeline_result(_variant(_unit_vec(31), i), geometry=base_geo + (i * 7.0))
+            for i in range(4)
+        ]
+        with patch("app.pipeline.process_frame", side_effect=results):
+            resp = self.client.post(
+                "/api/enroll",
+                data=json.dumps({"name": name, "usn": usn, "samples": [self._img] * 4}),
+                content_type="application/json",
+            )
+        data = json.loads(resp.data)
+        self.assertFalse(data["success"])
+        self.assertIn("inconsistent", data["message"])
 
     def test_wallet_auto_created_on_enrollment(self):
         vec = _unit_vec(101)

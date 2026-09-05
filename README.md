@@ -34,6 +34,8 @@ Companion docs:
    │                                                                  │
    │  1. Hand Landmark Detection      (core/hand_detector.py)         │
    │     MediaPipe Tasks HandLandmarker → 21 landmarks                │
+   │  1.5 Hand Geometry Features      (core/geometry.py)   ◄── v4     │
+   │     20-dim shape descriptor: ratios + signed splay angles        │
    │  2. Palm ROI + Affine Normalization (core/roi.py)                │
    │     wrist/MCP anchors → rotation+scale-normalized 128×128 crop   │
    │     (+ knuckle-line projection into ROI coordinates)             │
@@ -44,9 +46,13 @@ Companion docs:
    │  5. Finger Masking               (core/pipeline.py)              │
    │     rows above MCP knuckle line → feathered neutral fill         │
    │  6. Feature Extraction           (core/features.py)              │
-   │     multi-scale uniform LBP, radii (1,2), 4×4 grid → 1888-D      │
+   │     HOG (1764-D) + MB-uLBP (1888-D) Fusion → 3652-D              │
+   │     (Active: HogLbpFusion-v1-fm; CompCode & uLBP as baselines)   │
    │  7. Hardened Matching            (core/matcher.py)               │
    │     dual mean-template AND best-sample pass + ambiguity guard    │
+   │     + GEOMETRY GATE: candidate qualifies only if texture AND     │
+   │     hand-shape distance ≤ GEO_MAX_DIST (AND-fusion)              │
+   │     (Deep mode: DEEP_MATCH_THRESHOLD = 0.85 when enabled)        │
    │  8. Multi-Frame Fusion           (app.py /api/recognize)         │
    │     ≥3 of 4 frames must individually agree                       │
    └───────────┬─────────────────────────────────────────────────────┘
@@ -125,33 +131,47 @@ a measured cause of room→hall recognition drift. Applied identically at enroll
 recognition (single code path ⇒ consistent by construction). Config: `FINGER_MASK_ENABLED`,
 `FINGER_MASK_OFFSET_PX`.
 
-### Stage 6 — Feature extraction: multi-block multi-scale uniform LBP (`core/features.py`)
-For each radius $R \in \{1, 2\}$ the enhanced ROI is coded with the standard operator
+### Stage 6 — Feature extraction: HOG + Multi-Block Uniform LBP Fusion (`core/features.py`)
+The active production pipeline fuses macroscopic crease edge gradients with microscopic uniform texture patterns into a joint **3652-D** feature vector:
 
-$$LBP_{8,R}^{u2}(c) = \sum_{p=0}^{7} s(g_p - g_c)\,2^{\,p}, \qquad s(x)=\begin{cases}1 & x \ge 0\\ 0 & \text{else}\end{cases}$$
+1. **Multi-Scale Uniform LBP (1888-D):**
+   For each radius $R \in \{1, 2\}$ the enhanced ROI is coded with the operator:
+   $$LBP_{8,R}^{u2}(c) = \sum_{p=0}^{7} s(g_p - g_c)\,2^{\,p}, \qquad s(x)=\begin{cases}1 & x \ge 0\\ 0 & \text{else}\end{cases}$$
+   Mapped through a 256→59 uniform lookup table (58 uniform patterns + 1 non-uniform bin) across a **4×4 spatial grid** ($4 \times 4 \times 59 \times 2 = 1888\text{-D}$).
 
-then mapped through the 256→59 uniform-pattern lookup table (58 rotation-consistent uniform
-patterns + 1 non-uniform bin). The ROI is split into a **4×4 grid**; per block, per scale, a
-59-bin histogram is extracted, block-$L_2$ normalized, concatenated, then globally $L_2$
-normalized:
+2. **Histogram of Oriented Gradients / HOG (1764-D):**
+   Extracts directional line gradients over $8\times8$ pixel cells with $2\times2$ cell block normalization and 9 orientation bins ($7 \times 7 \times 4 \times 9 = 1764\text{-D}$), capturing strong principal lines and crease topology.
 
-$$\mathbf{v} \in \mathbb{R}^{1888},\; \lVert\mathbf{v}\rVert_2 = 1 \quad (4\times4\ \text{blocks} \times 59\ \text{bins} \times 2\ \text{scales})$$
+3. **Concatenation & Normalization:**
+   The block-normalized sub-vectors are concatenated and globally $L_2$ normalized:
+   $$\mathbf{v} = [\mathbf{v}_{\text{HOG}} \,\|\, \mathbf{v}_{\text{LBP}}] \in \mathbb{R}^{3652}, \qquad \lVert\mathbf{v}\rVert_2 = 1$$
 
-R=1 captures fine ridge micro-texture; R=2 adds coarser contextual texture — the classic
-multiresolution LBP accuracy lever. Layout order is fixed: block-major, R1 before R2.
+*Alternate baselines:* CompCode (1536-D Gabor orientation coding) and pure MB-uLBP (1888-D) remain fully supported in `config.py`.
 
 ### Stage 7 — Hardened 1:N matching (`core/matcher.py`)
 Cosine similarity (unit vectors ⇒ dot product), clamped to [-1,1], dimension-safe (stale-model
-templates score 0.0 rather than crash). Per candidate identity, **two independent signals**
-must clear the operating threshold T:
+templates score 0.0 rather than crash). The matcher dynamically evaluates against `active_threshold`:
+when `DEEP_ENABLED=True` and `DEEP_MATCH_THRESHOLD > 0.0`, it uses `DEEP_MATCH_THRESHOLD` (0.85);
+otherwise, it evaluates against the classical calibrated `threshold` (0.64 in config, or runtime override).
+
+Per candidate identity, **three independent signals** decide qualification:
 
 - `mean_score` — query vs the user's normalized **mean template** (primary, robust), and
-- `best_sample_score` — query vs the user's best individual enrollment sample (sanity check).
+- `best_sample_score` — query vs the user's best individual enrollment sample (sanity check), and
+- `geo_distance` — RMS normalized deviation of the query's 20-dim hand-geometry vector from the
+  user's enrollment statistics (per-dim mean/std, floored). Must be ≤ `GEO_MAX_DIST`.
 
-Top-1 qualifies only if **both** pass; ranking uses the mean score; and if top-1 and top-2 both
-qualify within `MATCHER_AMBIGUITY_MARGIN` (0.02), the result is **rejected as ambiguous**
-rather than guessed. These rules remove the max-of-noisy-scores inflation that originally let
-unregistered palms slip through at 0.80.
+Top-1 qualifies only if **all three** pass; ranking uses the mean score; and if top-1 and top-2
+both qualify within `MATCHER_AMBIGUITY_MARGIN` (0.02), the result is **rejected as ambiguous**
+rather than guessed. Rejection reasons are explicit: `below_threshold`, `geometry_mismatch`,
+`ambiguous` — the UI surfaces them truthfully.
+
+**Why geometry fusion exists (measured):** on a 9-user RGB-webcam cohort the LBP impostor
+distribution was 0.877–0.989 (mean 0.951) — every palm texture-correlates with every other
+palm, so no texture threshold is safe. Hand geometry (finger-length ratios, knuckle widths,
+inter-tip distances, **signed splay angles**) is a complementary, illumination-immune trait
+whose signed angles are mirror-sensitive — closing the left-hand-impersonation hole. Geometry
+is computed from landmarks only (Stage 1.5) and is untouched by ROI/masking/CLAHE.
 
 ### Stage 8 — Multi-frame fusion (`/api/recognize`)
 POS sends a burst of up to `FUSION_WINDOW`=4 frames (~220 ms apart). Decision requires:
@@ -170,7 +190,14 @@ operating point under the strict payment rule:
 > **Highest T with ZERO observed impostor accepts while GAR ≥ 90%.**
 
 Target margins before demo sign-off: `T − impostor_max ≥ 0.05` and `genuine_min − T ≥ 0.03`.
-The current default **0.78 is an uncalibrated placeholder**.
+The same zero-FAR rule governs `GEO_MAX_DIST` (distance metric: largest D below every observed
+impostor geometry distance while genuine acceptance stays ≥ 90%), suggested by
+`geometry_eval` in `/api/evaluate`.
+
+**Current calibrated operating point** (4-user cohort, texture+geometry AND-fusion):
+`T = 0.95`, `GEO_MAX_DIST = 1.5` — measured FAR 1.4% / GAR 67% before the pose-consistency
+gate was added; recalibrate on the flat-palm cohort. The texture channel alone is proven
+unsafe on RGB webcam cohorts (impostor mean 0.95) — geometry carries the discrimination.
 
 ---
 
@@ -184,14 +211,19 @@ Fingerprint-setup style — the user never clicks per-sample:
 3. When aligned + quality-passed, a high-quality (JPEG q=0.92) frame is auto-captured;
    **1.3 s cooldown**, then the next prompt appears.
 4. **Condition script** (6 samples): neutral baseline → tilt LEFT → tilt RIGHT → move closer →
-   turn palm **toward the light** → tip top of hand **away from camera**. Lighting and pitch
-   entries directly target the room→hall generalization failure.
+   same-spread reminder → flat-palm reminder. **Pitch/foreshortening prompts were removed in
+   Sprint v4**: out-of-plane rotation changes projected hand geometry and was measured to
+   destroy geometry-template consistency (session drift was the dominant error source).
 5. **Near-duplicate guard:** each candidate is diffed against the previous sample on a 32×32
    grayscale snapshot (< 1.5% mean-abs difference ⇒ skipped with "vary a bit more").
-6. Auto-submit to `/api/enroll` → wallet auto-created → done.
+6. **Pose-consistency gate (server-side):** samples whose geometry deviates more than
+   `ENROLL_GEO_CONSISTENCY_MAX_DIST` (absolute physical units, per-dim median) from the
+   enrollment's median are auto-dropped; the enrollment is rejected with coaching when fewer
+   than `MIN_ENROLLMENT_SAMPLES` survive. Texture+geometry are always dropped as a pair.
+7. Auto-submit to `/api/enroll` → wallet auto-created → done.
 
 Config: `DEFAULT_ENROLLMENT_SAMPLES=6` (min 3 / max 8), `ENROLL_CAPTURE_COOLDOWN_MS`,
-`ENROLL_POSE_PROMPTS`, `ENROLL_DUPLICATE_DIFF_PCT`.
+`ENROLL_POSE_PROMPTS`, `ENROLL_DUPLICATE_DIFF_PCT`, `ENROLL_GEO_CONSISTENCY_MAX_DIST`.
 
 ---
 
@@ -246,14 +278,26 @@ and the **biometric score** — this log is the pilot-phase evaluation dataset (
    verification for personal authentication.* Pattern Recognition, 43(4).
    → Scientific grounding for the Phase-3 multi-modal roadmap item (palmprint +
    knuckle-print fusion); knuckle texture is RGB-camera-friendly unlike dorsal veins (NIR).
+8. **Ross, A. & Jain, A. K. (2003).** *Information fusion in biometrics.* Pattern Recognition
+   Letters, 24(13), 2115–2125.
+   → AND/score-level fusion framework behind our texture⊕geometry decision rule.
+9. **Sanchez-Reillo, R., Sanchez-Avila, C., & Gonzalez-Macian, A. (2000).** *Biometric
+   identification through hand geometry measurements.* IEEE TPAMI, 22(10), 1168–1171.
+   → Establishes hand-geometry features (finger length/width ratios) as a deployable
+   biometric trait — the basis of our geometry channel.
 
-### Why not deep learning yet?
-Public palmprint models (CCNet, PalmNet, CompCode variants, ViTs) ship without turnkey
-pretrained embeddings for unconstrained webcam input, and would require training data we don't
-have pre-pilot. The classical MB-uLBP baseline is literature-standard, fully explainable
-(viva-friendly), runs in <100 ms on an i3, and the pilot's score logs become the training set
-for the planned deep-embedding swap behind the same `BasePalmModel` interface (see ROADMAP
-Phase 2). This is a deliberate sequencing decision, not a limitation of ambition.
+### Feature Extraction Options
+PalmPay supports three classical baselines that can be easily toggled in `config.py` depending on the webcam environment:
+1. **HOG + LBP Fusion:** (Active) Combines macroscopic crease edges (HOG, 1764-D) with microscopic skin texture (MB-uLBP, 1888-D) → **3652-D** unit-norm vector. Most discriminative on contactless RGB webcam input.
+2. **CompCode (Competitive Coding):** Uses 6 Gabor filters to extract robust line orientations (1536-D). Literature standard for palm crease orientation. Available baseline in `config.py`.
+3. **MB-uLBP:** The original literature-standard multi-scale local binary pattern approach (1888-D).
+
+### Deep Learning Architecture & Data Flywheel (Phase 2)
+The Phase-2 deep learning spike is fully implemented, tested, and flag-gated (`DEEP_ENABLED=False`):
+- **Serving Architecture:** [`DeepPalmModel`](file:///home/nightblaze/Projects/palm_pay_4/core/palm_model.py) executes 512-D MobileNetV3-Small embeddings via ONNX Runtime CPU. Template enrollment derives identity and dimension dynamically from `pipeline.model.get_model_name()` (`deep-palm-embedder-v1`) and `pipeline.model.get_feature_dim()` (512).
+- **Training Flywheel:** [`training/train.py`](file:///home/nightblaze/Projects/palm_pay_4/training/train.py) implements ArcFace margin loss on training subjects, paired with biometric verification (genuine/impostor separation, EER, and Zero-FAR GAR) on disjoint validation subjects.
+- **Strict Dependency & Privacy Isolation:** PyTorch is strictly contained in [`requirements-train.txt`](file:///home/nightblaze/Projects/palm_pay_4/requirements-train.txt) (kept out of production `requirements.txt`). Ephemeral ROI crops ($128\times128$ CLAHE + knuckle-line mask) are saved only when `DATASET_CAPTURE_ENABLED=True` and the user explicitly grants consent.
+- **Data Purge:** [`scripts/purge_dataset.py`](file:///home/nightblaze/Projects/palm_pay_4/scripts/purge_dataset.py) wipes ephemeral training crops after training, upholding the core privacy principle.
 
 ---
 
@@ -263,7 +307,7 @@ Phase 2). This is a deliberate sequencing decision, not a limitation of ambition
 ```bash
 mise exec python@3.11 -- python -m venv .venv      # create once (gitignored)
 .venv/bin/pip install -r requirements.txt          # deps ONLY inside .venv
-.venv/bin/python app.py                            # http://127.0.0.1:5000
+.venv/bin/python app.py                            # http://127.0.0.1:5001
 ```
 
 ### Windows (target demo laptop)
@@ -271,7 +315,7 @@ mise exec python@3.11 -- python -m venv .venv      # create once (gitignored)
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python app.py                                      # http://127.0.0.1:5000
+python app.py                                      # http://127.0.0.1:5001
 ```
 
 Server flags live in `config.py` (`SERVER_HOST`, `SERVER_PORT`, debug ON, reloader OFF —
@@ -279,8 +323,12 @@ restart manually after edits).
 
 ### Utilities
 ```bash
-python -m unittest discover tests          # 54 tests — must stay green after ANY change
+python -m unittest discover tests          # 101 tests — must stay green after ANY change
+ctest --test-dir cpp/build --output-on-failure # 4 C++ unit tests
 python scripts/verify_demo_script.py       # 13-step end-to-end demo rehearsal (pipeline mocked)
+python scripts/smoke_test_deep.py          # 8-step controlled DeepPalm end-to-end smoke test
+python scripts/eval_deep_model.py          # Head-to-head Classical vs Deep evaluation benchmark
+python scripts/purge_dataset.py --dataset data/pilot_rois # Privacy purge for ephemeral training crops
 python scripts/reset_biometrics.py --yes   # wipe biometric users/templates, PRESERVES merchants
 python scripts/seed_demo_dataset.py        # synthetic templates for offline evaluation testing
 python scripts/demo_pipeline_test.py       # visual pipeline stage dump (needs webcam)
@@ -335,35 +383,91 @@ status CHECK, biometric_score, note-as-type)` · `cashout_requests` / `topup_req
 ## 10. Verified vs Pending
 
 **Verified (code-level):**
-- [x] End-to-end pipeline on CPU: frame → landmarks → ROI → CLAHE → mask → 1888-D LBP → match
+- [x] End-to-end pipeline on CPU: frame → landmarks → ROI → CLAHE → mask → 3652-D HOG+LBP → match
 - [x] Quality-gate rejection paths with live coaching messages
 - [x] Finger-mask geometry (pure-function unit tests incl. byte-exactness below the cut)
-- [x] Hardened matcher semantics (dual-pass, ambiguity guard, dimension safety)
+- [x] **Hand-geometry channel** (20-dim invariant descriptor; rotation/scale/translation
+      invariance + mirror-sensitivity unit-tested) with AND-fusion matching gate
+- [x] **Enrollment pose-consistency gate** (absolute-unit outlier rejection, fail-fast coaching)
+- [x] Hardened matcher semantics (dual-pass, ambiguity guard, dimension safety, dynamic active threshold routing)
 - [x] 4-frame fusion agreement counting + `unstable_capture` path
 - [x] Payment ledger atomicity, session gating, IDOR-resistance (payer from server session)
-- [x] 54/54 automated tests · 13-step demo script green
+- [x] 101/101 automated Python unit tests · 4/4 C++ tests · 13-step demo script green
+- [x] **Phase-2 Spike (flag-gated):** Deep palm embedding interface (`DeepPalmModel`), challenge-response landmark liveness (`OPEN_PALM`, `FIST`, `SPREAD`), native C++ accelerated core, and data flywheel training pipeline
+- [x] **Deep Enrollment Identity Bug Resolved:** Template enrollment dynamically queries `pipeline.model.get_model_name()` and `pipeline.model.get_feature_dim()`, aligning with DB loader filters
+- [x] **Disjoint Validation:** `training/train.py` evaluates open-set biometric verification (pairwise genuine/impostor distributions, EER, Zero-FAR GAR) rather than cross-entropy on unseen validation subjects
+- [x] **Integration Smoke Test:** End-to-end controlled smoke test script passes with full enrollment, recognition, rejection (`deep_below_threshold`), and cleanup
 
 **Pending (empirical, on real palms):**
-- [ ] Genuine/impostor distributions on the upgraded extractor — the motivating incidents
-      (left palm accepted @0.80; room→hall failures; spread-finger sensitivity) have
-      structural fixes shipped but **not yet validated with human subjects**
-- [ ] Operating-threshold calibration + baked-in config value
+- [ ] Final calibration on the flat-palm cohort (pose-consistency gate just shipped)
+- [ ] Acceptance: decoy left hand + strangers rejected at the POS (geometry mirror-sensitivity
+      is expected to block cross-hand impersonation)
 - [ ] Cross-condition GAR/FAR across ≥10 subjects at the actual venue lighting
 
 ---
 
-## 11. Known Limitations (state honestly — also viva material)
+## 11. Known Limitations & Threat Model (state honestly — also viva material)
 
 1. **Illumination sensitivity mitigated, not solved.** RGB + classical features remain
    environment-sensitive. Mitigations shipped: quality gate, diversity-scripted enrollment,
    finger masking. Definitive fixes (NIR sensor / learned invariant embeddings) are ROADMAP
    Phases 2–3. Interim policy: **enroll where you pay.**
-2. **No liveness/anti-spoofing.** A printed photo may still authenticate. Challenge-response
-   liveness is a Phase-2 item; treat terminals as attended in the demo.
-3. **Small-cohort statistics.** Thresholds calibrated on few subjects generalize weakly;
+2. **Liveness & Anti-Spoofing posture (Phase 2):** Server-side challenge-response liveness (`OPEN_PALM`,
+   `FIST`, `SPREAD`) rejects static printouts, photo replays, and rigid translations without finger
+   articulation. However, liveness is an anti-spoofing defense layer rather than cryptographic proof;
+   high-effort physical video masks or synthetic replay attacks remain a threat model consideration
+   until NIR multispectral sensors are deployed.
+3. **Deep Model Status:** The ONNX embedder interface (`DeepPalmModel`) is ready for inference. A
+   scaffold script (`scripts/export_deep_model.py`) generates a deterministic local model without network
+   dependencies; real neural weights must be trained/fine-tuned on pilot transaction data before
+   calibrating `DEEP_MATCH_THRESHOLD`.
+4. **Small-cohort statistics.** Thresholds calibrated on few subjects generalize weakly;
    recalibrate as the cohort grows.
-4. **Security floor deferred by agreement** (documented in ROADMAP Phase 1): merchant terminal
+5. **Security floor deferred by agreement** (documented in ROADMAP Phase 1): merchant terminal
    auth, consumer PIN binding, rate limiting, HTTPS/secrets management. Acceptable only
    because the system holds no real money.
-5. **Privacy posture:** raw images never stored; only unit-norm float32 embeddings — note
-   embeddings are still biometric data and Phase 2 plans cancelable templates + encryption.
+6. **Privacy posture:** raw biometric images and raw liveness frames are **never stored**; only
+   derived unit-norm float32 embeddings, ephemeral pilot ROIs (only when consent checked), and single-use session tokens are maintained.
+
+---
+
+## 12. Phase-2 Spike: Configuration, C++ Core & Tests
+
+All Phase-2 capabilities are disabled by default (`DEEP_ENABLED = False`, `LIVENESS_ENABLED = False`, `NATIVE_CPP_ENABLED = False`, `PAYMENT_REQUIRES_LIVENESS = False`, `DATASET_CAPTURE_ENABLED = False`) to keep the Phase-0 demo 100% stable.
+
+### Feature Flags in `config.py`
+```python
+DEEP_ENABLED = False                    # Set True to switch to DeepPalmModel (ONNX / CPU)
+DEEP_MATCH_THRESHOLD = 0.85             # Calibrated matching threshold for DeepPalm
+LIVENESS_ENABLED = False                # Enables challenge-response liveness API
+LIVENESS_MIN_SCORE = 0.50               # Minimum composite score for liveness pass
+PAYMENT_REQUIRES_LIVENESS = False       # Enforces verified liveness token before debiting
+NATIVE_CPP_ENABLED = False              # Bridges performance-critical ops to C++ binary
+DATASET_CAPTURE_ENABLED = False         # Enables consent-gated ephemeral pilot ROI capture
+```
+
+### Building the C++ Native Core
+```bash
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build -j
+ctest --test-dir cpp/build --output-on-failure
+```
+
+### Running Test Suites & Deep Tools
+```bash
+# Python test suite (101 tests)
+.venv/bin/python -m unittest discover tests
+
+# End-to-end demo verification (13 scripted steps)
+.venv/bin/python scripts/verify_demo_script.py
+
+# Controlled deep model smoke test (enrollment, db schema, matching, rejection)
+.venv/bin/python scripts/smoke_test_deep.py
+
+# Benchmark classical vs deep model (synthetic / pilot)
+.venv/bin/python scripts/eval_deep_model.py
+
+# Purge ephemeral pilot ROIs (privacy compliance)
+.venv/bin/python scripts/purge_dataset.py --dataset data/pilot_rois
+```
+

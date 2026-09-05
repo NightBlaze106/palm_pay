@@ -51,6 +51,13 @@
                 <input type="text" id="input-usn" placeholder="e.g. 1MS21CS042" required autocomplete="off">
             </div>
 
+            <div class="form-group" style="margin-top: 1rem; background: var(--surface-2, rgba(255,255,255,0.03)); padding: 0.75rem; border-radius: var(--radius-sm, 6px); border: 1px solid var(--border-color, rgba(255,255,255,0.1));">
+                <label style="display: flex; align-items: flex-start; gap: 8px; font-size: 0.85rem; cursor: pointer; margin-bottom: 0;">
+                    <input type="checkbox" id="check-dataset-consent" style="margin-top: 3px; cursor: pointer;">
+                    <span><strong>Consent for Model Improvement:</strong> Allow anonymized palm ROI crops (128×128 CLAHE, no raw camera photos) to be saved ephemerally for DeepPalm offline training research.</span>
+                </label>
+            </div>
+
             <div style="margin-top: 1.5rem; margin-bottom: 0.5rem;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <label style="margin-bottom: 0;">Captured Biometric Samples</label>

@@ -5,3 +5,7 @@ palmpay.db
 .env
 data/demo_output/
 data/dataset/
+data/pilot_rois/
+cpp/build/
+models/palm_embedder.onnx
+models/checkpoints/

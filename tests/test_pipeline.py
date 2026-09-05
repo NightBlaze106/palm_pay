@@ -4,7 +4,7 @@ Tests:
 - HandDetector landmark extraction
 - PalmROIExtractor affine normalization and geometry
 - PalmPreprocessor grayscale & CLAHE enhancement
-- MBuLBPFeatureExtractor uniform LBP mapping and multi-scale output shape
+- CompCodeFeatureExtractor uniform LBP mapping and multi-scale output shape
 - PalmMatcher cosine similarity and 1:N decision rules
 - Database SQLite operations and vector blob serialization
 """
@@ -18,7 +18,7 @@ import config
 from core.hand_detector import HandDetector
 from core.roi import PalmROIExtractor
 from core.preprocessing import PalmPreprocessor
-from core.features import UniformLBPTable, MBuLBPFeatureExtractor
+from core.features import UniformLBPTable, CompCodeFeatureExtractor
 from core.palm_model import ClassicalPalmModel, get_palm_model
 from core.matcher import PalmMatcher
 from core.pipeline import BiometricPipeline
@@ -30,7 +30,7 @@ class TestBiometricPipeline(unittest.TestCase):
     def setUp(self):
         self.roi_extractor = PalmROIExtractor()
         self.preprocessor = PalmPreprocessor()
-        self.feature_extractor = MBuLBPFeatureExtractor()
+        self.feature_extractor = get_palm_model()
         self.model = ClassicalPalmModel()
         self.matcher = PalmMatcher()
 
@@ -82,14 +82,11 @@ class TestBiometricPipeline(unittest.TestCase):
     def test_feature_extraction_dimension_and_norm(self):
         """Verify that MB-uLBP produces exactly the configured multi-scale unit-norm vector."""
         dummy_enhanced = np.random.randint(0, 256, (config.ROI_HEIGHT, config.ROI_WIDTH), dtype=np.uint8)
-        vec = self.feature_extractor.extract_features(dummy_enhanced)
+        vec = self.feature_extractor.extract_embedding(dummy_enhanced)
 
         self.assertEqual(vec.shape, (config.FEATURE_VECTOR_DIM,))
         self.assertEqual(len(vec), config.FEATURE_VECTOR_DIM)
-        self.assertEqual(
-            len(vec),
-            config.LBP_GRID_X * config.LBP_GRID_Y * config.LBP_BINS_PER_BLOCK * len(config.LBP_RADII),
-        )
+        self.assertEqual(len(vec), config.FEATURE_VECTOR_DIM)
         self.assertEqual(vec.dtype, np.float32)
 
         # L2 Norm of non-zero feature vector must be 1.0

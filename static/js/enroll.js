@@ -290,12 +290,19 @@ document.addEventListener('DOMContentLoaded', () => {
     async function submitEnrollment() {
         const name = el.inputName.value.trim();
         const usn = el.inputUsn.value.trim();
+        const consentCheckbox = document.getElementById('check-dataset-consent');
+        const datasetConsent = consentCheckbox ? consentCheckbox.checked : false;
 
         try {
             const resp = await fetch('/api/enroll', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name, usn: usn, samples: captured })
+                body: JSON.stringify({
+                    name: name,
+                    usn: usn,
+                    samples: captured,
+                    dataset_consent: datasetConsent
+                })
             });
             const result = await resp.json();
             camera.stop();

@@ -1,0 +1,11 @@
+# PalmPay DeepPalm Model Training Dependencies (Phase 2 Data Flywheel)
+# NOTE: PyTorch and torchvision are strictly isolated to this file.
+# NEVER add torch to requirements.txt (keeps serving runtime lightweight and avoids Arch XNNPACK crashes).
+
+# CPU-only PyTorch for training MobileNetV3-Small embeddings
+torch>=2.0.0
+torchvision>=0.15.0
+onnx>=1.14.0
+onnxruntime>=1.16.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 import config
+from core.geometry import geometry_distance
 from core.matcher import PalmMatcher
 
 
@@ -198,6 +199,14 @@ class EvaluationEngine:
             suggested_t = max(p["threshold"] for p in zero_far_points)
             suggestion_policy = f"zero_far_gar_ge_{int(config.EVAL_SUGGESTION_MIN_GAR * 100)}pct"
 
+        # ---- Hand-geometry evaluation (Accuracy Sprint v4) ----
+        # Distance metric: LOWER is better. Genuine = leave-one-out distance of
+        # each enrollment sample against its user's remaining samples' stats;
+        # impostor = distance against every OTHER user's stats. Suggested
+        # GEO_MAX_DIST = the largest D with zero impostor passes while keeping
+        # genuine acceptance >= EVAL_SUGGESTION_MIN_GAR.
+        geometry_eval = self._evaluate_geometry(users_data)
+
         return {
             "status": "success",
             "message": "Evaluation completed on current empirical dataset.",
@@ -211,9 +220,97 @@ class EvaluationEngine:
             "eer_estimate": eer_point,
             "suggested_threshold": suggested_t,
             "suggestion_policy": suggestion_policy,
+            "geometry_eval": geometry_eval,
             "detailed_genuine": genuine_scores,
             "detailed_impostor": impostor_scores,
         }
+
+    @staticmethod
+    def _evaluate_geometry(users_data: List[Dict]) -> Dict:
+        """
+        Computes genuine/impostor hand-geometry distance distributions and the
+        suggested GEO_MAX_DIST under the strict zero-FAR policy. Returns an
+        empty (insufficient_data) payload when geometry is unavailable.
+        """
+        payload = {
+            "available": False,
+            "genuine_stats": {},
+            "impostor_stats": {},
+            "suggested_geo_max_dist": config.GEO_MAX_DIST,
+            "suggestion_policy": "default_uncalibrated",
+            "genuine_distances": [],
+            "impostor_distances": [],
+        }
+
+        users_with_geo = [u for u in users_data if len(u.get("geometry") or []) >= 2]
+        if len(users_with_geo) < 1:
+            return payload
+
+        def _stats(samples):
+            stacked = np.stack([np.asarray(g, dtype=np.float64) for g in samples], axis=0)
+            return stacked.mean(axis=0), stacked.std(axis=0)
+
+        genuine_d: List[float] = []
+        impostor_d: List[float] = []
+
+        for user in users_with_geo:
+            geos = user["geometry"]
+            # Genuine: leave-one-out so the query never contributes to its own stats.
+            for i in range(len(geos)):
+                rest = [g for j, g in enumerate(geos) if j != i]
+                mu, sigma = _stats(rest)
+                genuine_d.append(geometry_distance(np.asarray(geos[i]), mu, sigma))
+
+        for user_a in users_with_geo:
+            for user_b in users_with_geo:
+                if user_a["id"] == user_b["id"]:
+                    continue
+                mu, sigma = _stats(user_b["geometry"])
+                for g in user_a["geometry"]:
+                    impostor_d.append(geometry_distance(np.asarray(g), mu, sigma))
+
+        if not genuine_d or not impostor_d:
+            return payload
+
+        genuine_d_arr = np.array(genuine_d)
+        impostor_d_arr = np.array(impostor_d)
+
+        def _stats_payload(arr: np.ndarray) -> Dict:
+            return {
+                "count": int(arr.size),
+                "min": round(float(arr.min()), 4),
+                "max": round(float(arr.max()), 4),
+                "mean": round(float(arr.mean()), 4),
+                "std": round(float(arr.std()), 4),
+            }
+
+        payload["available"] = True
+        payload["genuine_stats"] = _stats_payload(genuine_d_arr)
+        payload["impostor_stats"] = _stats_payload(impostor_d_arr)
+        payload["genuine_distances"] = [round(float(d), 4) for d in genuine_d_arr]
+        payload["impostor_distances"] = [round(float(d), 4) for d in impostor_d_arr]
+
+        # Zero-FAR suggestion for a distance metric: D must sit BELOW every
+        # observed impostor distance; pick the largest 0.05-step D that keeps
+        # genuine acceptance >= EVAL_SUGGESTION_MIN_GAR.
+        min_impostor = float(impostor_d_arr.min())
+        candidate = None
+        step = 0.05
+        d = float(np.floor(min_impostor / step) * step)
+        while d >= 0.0:
+            gar = float((genuine_d_arr < d).mean())
+            if gar >= config.EVAL_SUGGESTION_MIN_GAR:
+                candidate = round(d, 2)
+                break
+            d = round(d - step, 2)
+
+        if candidate is not None and candidate > 0:
+            payload["suggested_geo_max_dist"] = candidate
+            payload["suggestion_policy"] = (
+                f"geo_zero_far_gar_ge_{int(config.EVAL_SUGGESTION_MIN_GAR * 100)}pct"
+            )
+
+        return payload
 
     @staticmethod
     def generate_csv_report(eval_result: Dict) -> str:

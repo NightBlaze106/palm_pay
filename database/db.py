@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 import config
+from core.geometry import GEO_FEATURE_DIM
 
 
 class Database:
@@ -67,6 +68,24 @@ class Database:
                 """
                 CREATE INDEX IF NOT EXISTS idx_templates_user_id ON templates(user_id);
                 """
+            )
+            # ---- Accuracy Sprint v4: Hand geometry templates ----
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS geometry_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    sample_index INTEGER NOT NULL,
+                    geo_blob BLOB NOT NULL,
+                    geo_dim INTEGER NOT NULL,
+                    geo_version TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                );
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_geometry_user_id ON geometry_templates(user_id);"
             )
             # ---- Payment System (Demo / Prototype) Schema Additions ----
             cursor.execute(
@@ -137,6 +156,13 @@ class Database:
                 );
                 """
             )
+            # ---- Phase-2 Idempotent Column Additions ----
+            cursor.execute("PRAGMA table_info(transactions)")
+            txn_cols = [row["name"] for row in cursor.fetchall()]
+            if "liveness_score" not in txn_cols:
+                cursor.execute("ALTER TABLE transactions ADD COLUMN liveness_score REAL NULL")
+            if "liveness_status" not in txn_cols:
+                cursor.execute("ALTER TABLE transactions ADD COLUMN liveness_status TEXT NULL")
             conn.commit()
         finally:
             conn.close()
@@ -189,7 +215,7 @@ class Database:
         self,
         user_id: int,
         embeddings: List[np.ndarray],
-        model_name: str = config.MODEL_NAME,
+        model_name: Optional[str] = None,
     ) -> bool:
         """
         Stores a batch of sample feature embeddings for an enrolled user.
@@ -197,13 +223,16 @@ class Database:
         Args:
             user_id: ID of the user.
             embeddings: List of 1D float32 numpy arrays.
-            model_name: Model identifier string.
+            model_name: Model identifier string. Defaults to active model.
 
         Returns:
             True if all templates were successfully stored.
         """
         if not embeddings:
             return False
+
+        if model_name is None:
+            model_name = config.DEEP_MODEL_NAME if getattr(config, "DEEP_ENABLED", False) else config.MODEL_NAME
 
         conn = self.get_connection()
         try:
@@ -231,10 +260,55 @@ class Database:
         finally:
             conn.close()
 
-    def get_all_users_with_templates(self) -> List[Dict]:
+    def add_geometry_templates(
+        self,
+        user_id: int,
+        geometries: List[np.ndarray],
+        geo_version: str = config.GEO_FEATURE_VERSION,
+    ) -> bool:
+        """Stores a batch of hand-geometry feature vectors for an enrolled user."""
+        if not geometries:
+            return False
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            for idx, geo in enumerate(geometries):
+                cursor.execute(
+                    """
+                    INSERT INTO geometry_templates (user_id, sample_index, geo_blob, geo_dim, geo_version, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        idx + 1,
+                        np.asarray(geo, dtype=np.float32).tobytes(),
+                        int(np.asarray(geo).shape[0]),
+                        geo_version,
+                        self._now_iso(),
+                    ),
+                )
+            conn.commit()
+            return True
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+    def get_all_users_with_templates(
+        self,
+        model_name: Optional[str] = None,
+        feature_dim: Optional[int] = None,
+    ) -> List[Dict]:
         """
         Retrieves all enrolled users along with their deserialized template embeddings.
+        Filters by model_name and feature_dim (defaulting to current config / deep model).
         """
+        if model_name is None:
+            model_name = config.DEEP_MODEL_NAME if getattr(config, "DEEP_ENABLED", False) else config.MODEL_NAME
+        if feature_dim is None:
+            feature_dim = config.DEEP_FEATURE_DIM if getattr(config, "DEEP_ENABLED", False) else config.FEATURE_VECTOR_DIM
+
         users_map = {}
         conn = self.get_connection()
         try:
@@ -251,6 +325,7 @@ class Database:
                     "created_at": row["created_at"],
                     "templates": [],
                     "sample_count": 0,
+                    "geometry": [],
                 }
 
             cursor.execute(
@@ -259,7 +334,7 @@ class Database:
                 WHERE feature_dim = ? AND model_name = ?
                 ORDER BY user_id, sample_index ASC
                 """,
-                (config.FEATURE_VECTOR_DIM, config.MODEL_NAME),
+                (feature_dim, model_name),
             )
             for row in cursor.fetchall():
                 uid = row["user_id"]
@@ -267,6 +342,23 @@ class Database:
                     vec = self.deserialize_vector(row["feature_blob"], row["feature_dim"])
                     users_map[uid]["templates"].append(vec)
                     users_map[uid]["sample_count"] += 1
+
+            if config.GEO_ENABLED:
+                geo_cursor = conn.cursor()
+                geo_cursor.execute(
+                    """
+                    SELECT user_id, sample_index, geo_blob, geo_dim, geo_version FROM geometry_templates
+                    WHERE geo_dim = ? AND geo_version = ?
+                    ORDER BY user_id, sample_index ASC
+                    """,
+                    (GEO_FEATURE_DIM, config.GEO_FEATURE_VERSION),
+                )
+                for row in geo_cursor.fetchall():
+                    uid = row["user_id"]
+                    if uid in users_map:
+                        vec = np.frombuffer(row["geo_blob"], dtype=np.float32)
+                        if len(vec) == row["geo_dim"]:
+                            users_map[uid]["geometry"].append(vec)
         finally:
             conn.close()
 
@@ -309,6 +401,7 @@ class Database:
             cursor.execute("DELETE FROM topup_requests WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM wallets WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM templates WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM geometry_templates WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
             conn.commit()
             return True
@@ -464,6 +557,8 @@ class Database:
         biometric_score: Optional[float] = None,
         note: Optional[str] = None,
         transaction_id: Optional[str] = None,
+        liveness_score: Optional[float] = None,
+        liveness_status: Optional[str] = None,
     ) -> str:
         """Inserts a transaction row and returns its UUID id."""
         txn_id = transaction_id or self.new_transaction_id()
@@ -472,8 +567,8 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO transactions (id, sender_user_id, merchant_id, merchant_name, amount, status, biometric_score, note, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO transactions (id, sender_user_id, merchant_id, merchant_name, amount, status, biometric_score, note, liveness_score, liveness_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     txn_id,
@@ -484,6 +579,8 @@ class Database:
                     status,
                     biometric_score,
                     note,
+                    liveness_score,
+                    liveness_status,
                     self._now_iso(),
                 ),
             )
@@ -502,6 +599,7 @@ class Database:
             txn_type = "CASHOUT"
         else:
             txn_type = "PAYMENT"
+        keys = row.keys() if hasattr(row, "keys") else []
         return {
             "id": row["id"],
             "sender_user_id": row["sender_user_id"],
@@ -510,6 +608,8 @@ class Database:
             "amount": float(row["amount"]),
             "status": row["status"],
             "biometric_score": row["biometric_score"],
+            "liveness_score": row["liveness_score"] if "liveness_score" in keys else None,
+            "liveness_status": row["liveness_status"] if "liveness_status" in keys else None,
             "note": note,
             "type": txn_type,
             "created_at": row["created_at"],
@@ -976,6 +1076,8 @@ class Database:
         merchant_name: str,
         amount: float,
         biometric_score: Optional[float] = None,
+        liveness_score: Optional[float] = None,
+        liveness_status: Optional[str] = None,
     ) -> Dict:
         """
         Atomically debits the consumer wallet, credits the merchant wallet, and
@@ -1010,10 +1112,10 @@ class Database:
                 # Log the failed attempt for audit; no balances change.
                 cursor.execute(
                     """
-                    INSERT INTO transactions (id, sender_user_id, merchant_id, merchant_name, amount, status, biometric_score, note, created_at)
-                    VALUES (?, ?, ?, ?, ?, 'FAILED_BALANCE', ?, 'Insufficient wallet balance', ?)
+                    INSERT INTO transactions (id, sender_user_id, merchant_id, merchant_name, amount, status, biometric_score, note, liveness_score, liveness_status, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'FAILED_BALANCE', ?, 'Insufficient wallet balance', ?, ?, ?)
                     """,
-                    (txn_id, sender_user_id, merchant_user_id, merchant_name, amount, biometric_score, self._now_iso()),
+                    (txn_id, sender_user_id, merchant_user_id, merchant_name, amount, biometric_score, liveness_score, liveness_status, self._now_iso()),
                 )
                 conn.commit()
                 return {"status": "FAILED_BALANCE", "transaction_id": txn_id, "balance": round(balance, 2)}
@@ -1029,10 +1131,10 @@ class Database:
             )
             cursor.execute(
                 """
-                INSERT INTO transactions (id, sender_user_id, merchant_id, merchant_name, amount, status, biometric_score, note, created_at)
-                VALUES (?, ?, ?, ?, ?, 'SUCCESS', ?, 'Palm-verified payment', ?)
+                INSERT INTO transactions (id, sender_user_id, merchant_id, merchant_name, amount, status, biometric_score, note, liveness_score, liveness_status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'SUCCESS', ?, 'Palm-verified payment', ?, ?, ?)
                 """,
-                (txn_id, sender_user_id, merchant_user_id, merchant_name, amount, biometric_score, self._now_iso()),
+                (txn_id, sender_user_id, merchant_user_id, merchant_name, amount, biometric_score, liveness_score, liveness_status, self._now_iso()),
             )
             conn.commit()
         except Exception as exc:

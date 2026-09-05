@@ -70,14 +70,14 @@ class FingerMaskTests(unittest.TestCase):
         self.assertIn("cut_out_of_bounds", info["skipped"])
 
     def test_embedding_on_masked_roi_stays_valid(self):
-        from core.features import MBuLBPFeatureExtractor
+        from core.palm_model import get_palm_model
         rng = np.random.default_rng(0)
         base = np.tile(np.linspace(80, 180, 128), (128, 1)).astype(np.int16)
         roi = np.clip(base + rng.integers(-10, 10, (128, 128), dtype=np.int16), 0, 255).astype(np.uint8)
         masked, info = apply_finger_mask(roi, 50.0)
         self.assertTrue(info["applied"])
 
-        vec = MBuLBPFeatureExtractor().extract_features(masked)
+        vec = get_palm_model().extract_embedding(masked)
         self.assertEqual(vec.shape, (config.FEATURE_VECTOR_DIM,))
         self.assertAlmostEqual(float(np.linalg.norm(vec)), 1.0, places=5)
 
@@ -184,8 +184,14 @@ class StrictEvaluationPolicyTests(unittest.TestCase):
     def test_suggested_threshold_zero_far_with_gar_floor(self):
         rng = np.random.default_rng(42)
         users = []
+        global_bias = rng.standard_normal(config.FEATURE_VECTOR_DIM).astype(np.float32)
+        global_bias /= np.linalg.norm(global_bias)
+
         for i in range(3):
             base = rng.standard_normal(config.FEATURE_VECTOR_DIM).astype(np.float32)
+            base /= np.linalg.norm(base)
+            # Add small shared bias so impostor scores are positive across dimensions
+            base = 0.85 * base + 0.15 * global_bias
             base /= np.linalg.norm(base)
             samples = []
             for j in range(4):

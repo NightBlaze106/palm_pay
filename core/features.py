@@ -175,3 +175,150 @@ class MBuLBPFeatureExtractor:
             feature_vector /= global_norm
 
         return feature_vector
+
+
+import cv2
+
+class CompCodeFeatureExtractor:
+    """
+    Competitive Coding (CompCode) feature extractor.
+    Convolves the ROI with a bank of 6 Gabor filters (0 to 150 degrees).
+    The winning orientation (0-5) at each pixel forms the competitive code map.
+    To provide translation invariance and interface with the existing Cosine Similarity 
+    matcher, the code map is aggregated into block histograms (e.g. 16x16 grid), 
+    yielding a fixed-length embedding.
+    """
+    def __init__(
+        self,
+        grid_x: int = config.COMPCODE_GRID_X,
+        grid_y: int = config.COMPCODE_GRID_Y,
+        num_orientations: int = config.COMPCODE_ORIENTATIONS,
+    ):
+        self.grid_x = grid_x
+        self.grid_y = grid_y
+        self.num_orientations = num_orientations
+        self.expected_dim = grid_x * grid_y * num_orientations
+        
+        # Create Gabor filter bank
+        self.filters = []
+        ksize = 17
+        sigma = 3.0
+        lambd = 10.0
+        gamma = 0.5
+        psi = 0.0
+        for i in range(num_orientations):
+            theta = i * (np.pi / num_orientations)
+            # We want to detect dark lines on light background. 
+            kernel = cv2.getGaborKernel((ksize, ksize), sigma, theta, lambd, gamma, psi, ktype=cv2.CV_32F)
+            # Zero mean the kernel to ignore illumination baseline
+            kernel -= np.mean(kernel)
+            self.filters.append(kernel)
+
+    def extract_features(self, enhanced_roi: np.ndarray) -> np.ndarray:
+        if enhanced_roi is None or enhanced_roi.size == 0:
+            return np.zeros(self.expected_dim, dtype=np.float32)
+        
+        # Ensure single-channel 2D
+        if len(enhanced_roi.shape) == 3:
+            enhanced_roi = enhanced_roi[:, :, 0]
+            
+        img = enhanced_roi.astype(np.float32)
+        
+        # Convolve with all filters
+        responses = []
+        for kernel in self.filters:
+            # We look for dark lines, so if kernel has positive center, dark lines give negative response.
+            # Thus we can look for the minimum response, or we invert the image.
+            # Let us invert the image so lines are bright:
+            resp = cv2.filter2D(255.0 - img, cv2.CV_32F, kernel)
+            responses.append(resp)
+            
+        responses = np.stack(responses, axis=-1) # shape: (H, W, 6)
+        
+        # Competitive coding: find orientation with max response
+        comp_code_map = np.argmax(responses, axis=-1) # shape: (H, W)
+        
+        # Compute block histograms
+        h, w = comp_code_map.shape
+        block_h = h // self.grid_y
+        block_w = w // self.grid_x
+        
+        feature_blocks = []
+        for gy in range(self.grid_y):
+            for gx in range(self.grid_x):
+                y_start = gy * block_h
+                y_end = (gy + 1) * block_h if gy < self.grid_y - 1 else h
+                x_start = gx * block_w
+                x_end = (gx + 1) * block_w if gx < self.grid_x - 1 else w
+                
+                sub_block = comp_code_map[y_start:y_end, x_start:x_end]
+                hist, _ = np.histogram(sub_block, bins=self.num_orientations, range=(0, self.num_orientations))
+                hist = hist.astype(np.float32)
+                
+                norm_val = np.linalg.norm(hist)
+                if norm_val > 1e-7:
+                    hist /= norm_val
+                    
+                feature_blocks.append(hist)
+                
+        feature_vector = np.concatenate(feature_blocks).astype(np.float32)
+        
+        global_norm = np.linalg.norm(feature_vector)
+        if global_norm > 1e-7:
+            feature_vector /= global_norm
+            
+        return feature_vector
+
+
+
+class HogLbpFusionFeatureExtractor:
+    """
+    Fuses Histogram of Oriented Gradients (HOG) with MB-uLBP.
+    HOG captures macroscopic edge structures (crease lines) while LBP captures
+    microscopic skin texture. Fusing them often outperforms either alone.
+    """
+    def __init__(self):
+        import cv2
+        # LBP Component
+        self.lbp = MBuLBPFeatureExtractor()
+        
+        # HOG Component
+        win_size = (128, 128)
+        block_size = (32, 32)
+        block_stride = (16, 16)
+        cell_size = (16, 16)
+        nbins = 9
+        self.hog = cv2.HOGDescriptor(win_size, block_size, block_stride, cell_size, nbins)
+        
+        # Total expected dimension
+        self.hog_dim = 1764
+        self.expected_dim = self.lbp.expected_dim + self.hog_dim
+
+    def extract_features(self, enhanced_roi):
+        import numpy as np
+        if enhanced_roi is None or enhanced_roi.size == 0:
+            return np.zeros(self.expected_dim, dtype=np.float32)
+            
+        if len(enhanced_roi.shape) == 3:
+            enhanced_roi = enhanced_roi[:, :, 0]
+            
+        img = enhanced_roi.astype(np.uint8)
+        
+        # 1. Extract LBP
+        lbp_feat = self.lbp.extract_features(img)
+        
+        # 2. Extract HOG
+        hog_feat = self.hog.compute(img).flatten()
+        # L2 Normalize HOG independently before concatenation
+        hog_norm = np.linalg.norm(hog_feat)
+        if hog_norm > 1e-7:
+            hog_feat /= hog_norm
+            
+        # 3. Concatenate and normalize jointly
+        fused = np.concatenate([lbp_feat, hog_feat]).astype(np.float32)
+        fused_norm = np.linalg.norm(fused)
+        if fused_norm > 1e-7:
+            fused /= fused_norm
+            
+        return fused
+

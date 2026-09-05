@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 import config
+from core.geometry import geometry_distance
 
 
 class PalmMatcher:
@@ -17,6 +18,17 @@ class PalmMatcher:
 
     def __init__(self, threshold: float = config.DEFAULT_RECOGNITION_THRESHOLD):
         self.threshold = float(threshold)
+
+    @property
+    def active_threshold(self) -> float:
+        """
+        Returns the effective decision threshold:
+        Uses DEEP_MATCH_THRESHOLD when DEEP_ENABLED is True and DEEP_MATCH_THRESHOLD > 0.0,
+        otherwise returns self.threshold.
+        """
+        if getattr(config, "DEEP_ENABLED", False) and getattr(config, "DEEP_MATCH_THRESHOLD", 0.0) > 0.0:
+            return float(config.DEEP_MATCH_THRESHOLD)
+        return float(self.threshold)
 
     def set_threshold(self, threshold: float):
         """Updates the decision threshold dynamically."""
@@ -73,10 +85,23 @@ class PalmMatcher:
                     best = s
         return max(best, 0.0)
 
+    @staticmethod
+    def user_geometry_stats(user: Dict):
+        """
+        Per-dimension mean/std of a user's enrollment geometry vectors.
+        Returns (mean, std) or (None, None) when the user has no usable geometry.
+        """
+        geos = user.get("geometry") or []
+        if not geos:
+            return None, None
+        stacked = np.stack([np.asarray(g, dtype=np.float64) for g in geos], axis=0)
+        return stacked.mean(axis=0), stacked.std(axis=0)
+
     def match_1_to_n(
         self,
         query_embedding: np.ndarray,
         enrolled_users: List[Dict],
+        query_geometry: Optional[np.ndarray] = None,
     ) -> Dict:
         """
         Matches a query palm embedding against all enrolled user templates (1:N search).
@@ -121,12 +146,18 @@ class PalmMatcher:
             }
 
         # ---- Hardened scoring (Accuracy Sprint) ----
-        # For each user compute TWO signals:
+        # For each user compute TWO texture signals:
         #   mean_score  — cosine vs the user's normalized MEAN template (robust, primary)
         #   best_sample — max cosine over individual samples (sanity check)
-        # A candidate only qualifies when BOTH clear the threshold. Ranking uses
-        # the mean score. This removes the old max-of-noisy-scores inflation that
-        # let unregistered palms slip through.
+        # plus, when geometry fusion is active (Sprint v4), a third gate:
+        #   geo_distance — RMS normalized deviation of hand-shape features; a
+        #   candidate qualifies ONLY when texture passes AND geometry passes.
+        # Ranking uses the mean score. This removes the old max-of-noisy-scores
+        # inflation and blocks impostors whose skin texture happens to correlate.
+        query_geo = None
+        if config.GEO_ENABLED and query_geometry is not None:
+            query_geo = np.asarray(query_geometry, dtype=np.float64)
+
         candidates = []
         for user in enrolled_users:
             user_templates = user.get("templates", [])
@@ -140,6 +171,17 @@ class PalmMatcher:
                 default=0.0,
             )
 
+            geo_distance = None
+            geo_pass = True
+            if query_geo is not None:
+                ref_mean, ref_std = self.user_geometry_stats(user)
+                if ref_mean is not None:
+                    geo_distance = geometry_distance(query_geo, ref_mean, ref_std)
+                    geo_pass = geo_distance <= config.GEO_MAX_DIST
+                # Candidate without geometry data -> legacy texture-only path.
+
+            thresh = self.active_threshold
+            texture_passes = (mean_score >= thresh) and (best_sample >= thresh)
             candidates.append(
                 {
                     "user_id": user["id"],
@@ -147,16 +189,20 @@ class PalmMatcher:
                     "usn": user.get("usn", ""),
                     "score": round(mean_score, 4),
                     "best_sample_score": round(best_sample, 4),
-                    "_passes": (mean_score >= self.threshold) and (best_sample >= self.threshold),
+                    "geo_distance": round(geo_distance, 3) if geo_distance is not None else None,
+                    "_texture_passes": texture_passes,
+                    "_geo_passes": geo_pass,
+                    "_passes": texture_passes and geo_pass,
                 }
             )
 
+        thresh = self.active_threshold
         if not candidates:
             return {
                 "recognized": False,
                 "matched_user": None,
                 "similarity_score": 0.0,
-                "threshold_used": self.threshold,
+                "threshold_used": thresh,
                 "all_scores": [],
                 "reason": "no_valid_templates",
                 "message": "No usable templates found for enrolled users.",
@@ -168,7 +214,8 @@ class PalmMatcher:
         second = candidates[1] if len(candidates) > 1 else None
 
         all_scores = [
-            {"user_id": c["user_id"], "name": c["name"], "usn": c["usn"], "score": c["score"], "best_sample_score": c["best_sample_score"]}
+            {"user_id": c["user_id"], "name": c["name"], "usn": c["usn"], "score": c["score"],
+             "best_sample_score": c["best_sample_score"], "geo_distance": c["geo_distance"]}
             for c in candidates
         ]
 
@@ -176,17 +223,37 @@ class PalmMatcher:
             return {"id": c["user_id"], "name": c["name"], "usn": c["usn"]}
 
         if not top["_passes"]:
+            # Distinguish the failing signal so the UI can tell the truth.
+            if top["_texture_passes"] and not top["_geo_passes"]:
+                return {
+                    "recognized": False,
+                    "matched_user": None,
+                    "best_candidate": _public(top),
+                    "similarity_score": round(max(top["score"], 0.0), 4),
+                    "threshold_used": thresh,
+                    "geo_distance": top["geo_distance"],
+                    "geo_threshold": config.GEO_MAX_DIST,
+                    "all_scores": all_scores,
+                    "reason": "geometry_mismatch",
+                    "message": (
+                        f"Hand shape does not match {top['name']} "
+                        f"(geometry distance {top['geo_distance']} > limit {config.GEO_MAX_DIST})."
+                    ),
+                }
+            reason_str = "deep_below_threshold" if getattr(config, "DEEP_ENABLED", False) else "below_threshold"
             return {
                 "recognized": False,
                 "matched_user": None,
                 "best_candidate": _public(top),
                 "similarity_score": round(max(top["score"], 0.0), 4),
-                "threshold_used": self.threshold,
+                "threshold_used": thresh,
+                "geo_distance": top["geo_distance"],
+                "geo_threshold": config.GEO_MAX_DIST if query_geo is not None else None,
                 "all_scores": all_scores,
-                "reason": "below_threshold",
+                "reason": reason_str,
                 "message": (
                     f"Palm Not Recognized (Best Match: {top['name']} with Score: "
-                    f"{top['score']:.4f} < Threshold: {self.threshold:.2f})"
+                    f"{top['score']:.4f} < Threshold: {thresh:.2f})"
                 ),
             }
 
@@ -204,7 +271,9 @@ class PalmMatcher:
                 "matched_user": None,
                 "best_candidate": _public(top),
                 "similarity_score": round(max(top["score"], 0.0), 4),
-                "threshold_used": self.threshold,
+                "threshold_used": thresh,
+                "geo_distance": top["geo_distance"],
+                "geo_threshold": config.GEO_MAX_DIST if query_geo is not None else None,
                 "all_scores": all_scores,
                 "reason": "ambiguous",
                 "message": (
@@ -218,11 +287,13 @@ class PalmMatcher:
             "matched_user": _public(top),
             "best_candidate": _public(top),
             "similarity_score": round(max(top["score"], 0.0), 4),
-            "threshold_used": self.threshold,
+            "threshold_used": thresh,
+            "geo_distance": top["geo_distance"],
+            "geo_threshold": config.GEO_MAX_DIST if query_geo is not None else None,
             "all_scores": all_scores,
             "reason": "ok",
             "message": (
                 f"Palm Recognized: {top['name']} (Mean-Template Score: {top['score']:.4f} "
-                f">= Threshold: {self.threshold:.2f})"
+                f">= Threshold: {thresh:.2f}; Geometry Distance: {top['geo_distance']})"
             ),
         }
