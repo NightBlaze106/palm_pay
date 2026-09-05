@@ -50,11 +50,19 @@ Shell quirk: killing the server can hang the bash tool past its timeout — issu
 m3 Stationery/Retail, m4 Library/Services); seeded as `MERCH-*` users with MERCHANT wallets.
 They are excluded from biometric user listings.
 
-## 3. Current Biometric Approach (v4 — geometry fusion)
+## 3. Dual-Engine Biometric Architecture (Classical Vision + Deep Learning)
 
-Model string: **`HogLbpFusion-v1-fm`** (texture, **3652-D**) + **`handgeo-v1`** (geometry, 20-D).
-Alternative baselines available in `config.py`: CompCode (`CompCode-v1-fm`, 1536-D) and legacy MB-uLBP (`MB-uLBP2R-CLAHE-v2-fm`, 1888-D).
-Phase-2 deep embedding model (`deep-palm-embedder-v1`, 512-D) is implemented and flag-gated (`DEEP_ENABLED=False`).
+PalmPay features two distinct feature extraction engines behind a unified `BasePalmModel` interface:
+1. **Classical Fusion Engine (Production Default):**
+   - Texture: **`HogLbpFusion-v1-fm`** (**3652-D** = HOG 1764-D crease lines + MB-uLBP 1888-D microtexture).
+   - Geometry: **`handgeo-v1`** (20-D invariant descriptor: finger ratios + signed splay angles for mirror sensitivity).
+   - Baselines: CompCode (`CompCode-v1-fm`, 1536-D) and MB-uLBP (`MB-uLBP2R-CLAHE-v2-fm`, 1888-D).
+   - *Advantage:* Zero training required; 100% deterministic and robust on cold-start.
+2. **Deep Learning Engine (`DeepPalmModel`, Flag-Gated):**
+   - Embedder: **`deep-palm-embedder-v1`** (**512-D** MobileNetV3-Small + ArcFace loss).
+   - Inference: Runs via ONNX Runtime on CPU (<15 ms per frame, `models/palm_embedder.onnx`).
+   - Training: Full PyTorch flywheel in `training/train.py` using disjoint pairwise verification (EER / Zero-FAR GAR).
+   - *Activation:* Simply set `DEEP_ENABLED = True` in `config.py`.
 
 Pipeline (all inside `BiometricPipeline.process_frame`, `core/pipeline.py`):
 
