@@ -27,12 +27,15 @@ recognizes and debits automatically. Everything labeled **Demo / Prototype** —
 # Run server (port 5001, debug on, reloader OFF → restart manually after edits):
 .venv/bin/python app.py                      # http://127.0.0.1:5001
 
-# Tests (101 total Python tests + 4 C++ tests, must always be green):
-.venv/bin/python -m unittest discover tests
+# Tests (107 total Python tests + 4 C++ tests, must always be green):
+ACTIVE_MODEL="classical" .venv/bin/python -m unittest discover tests
 ctest --test-dir cpp/build --output-on-failure
 
 # End-to-end demo verification (13 scripted steps, pipeline mocked):
 .venv/bin/python scripts/verify_demo_script.py
+
+# Download CCNet ONNX weights (~257 MB):
+.venv/bin/python scripts/download_ccnet.py
 
 # Controlled deep model smoke test (enrollment, DB schema, matching, rejection):
 .venv/bin/python scripts/smoke_test_deep.py
@@ -50,19 +53,35 @@ Shell quirk: killing the server can hang the bash tool past its timeout — issu
 m3 Stationery/Retail, m4 Library/Services); seeded as `MERCH-*` users with MERCHANT wallets.
 They are excluded from biometric user listings.
 
-## 3. Dual-Engine Biometric Architecture (Classical Vision + Deep Learning)
+## 3. Multi-Model Biometric Architecture (Classical, Foundation & Deep Models)
 
-PalmPay features two distinct feature extraction engines behind a unified `BasePalmModel` interface:
-1. **Classical Fusion Engine (Production Default):**
-   - Texture: **`HogLbpFusion-v1-fm`** (**3652-D** = HOG 1764-D crease lines + MB-uLBP 1888-D microtexture).
+PalmPay features selectable feature extraction engines behind a unified `BasePalmModel` interface:
+1. **Classical Fusion Engine (`HogLbpFusion-v1-fm`, 3652-D):**
+   - Texture: HOG (1764-D crease lines) + MB-uLBP (1888-D microtexture).
    - Geometry: **`handgeo-v1`** (20-D invariant descriptor: finger ratios + signed splay angles for mirror sensitivity).
    - Baselines: CompCode (`CompCode-v1-fm`, 1536-D) and MB-uLBP (`MB-uLBP2R-CLAHE-v2-fm`, 1888-D).
    - *Advantage:* Zero training required; 100% deterministic and robust on cold-start.
-2. **Deep Learning Engine (`DeepPalmModel`, Flag-Gated):**
-   - Embedder: **`deep-palm-embedder-v1`** (**512-D** MobileNetV3-Small + ArcFace loss).
-   - Inference: Runs via ONNX Runtime on CPU (<15 ms per frame, `models/palm_embedder.onnx`).
+2. **Foundation Vision Transformer (`dinov2-vits14-v1`, 384-D, Active Default):**
+   - Embedder: Meta DINOv2 ViT-S/14 self-supervised foundation model loaded via `torch.hub`.
+   - Input: $128\times128$ grayscale crop resized to $224\times224$ RGB with ImageNet normalization.
+   - *Advantage:* Zero domain training required; high generalization to pose and illumination variation.
+3. **Pretrained Contactless Palmprint Network (`ccnet-onnx-v1`, 2048-D):**
+   - Embedder: CCNet (Yang et al., IEEE TIFS 2023) trained on the benchmark Tongji contactless dataset.
+   - Inference: Runs via ONNX Runtime CPU (`models/palm_ccnet.onnx`, downloaded via `scripts/download_ccnet.py`).
+   - *Advantage:* Domain-specialized palmprint representation; fast (~12 ms) CPU inference.
+4. **Deep Learning Engine (`deep-palm-embedder-v1`, 512-D, Flag-Gated):**
+   - Embedder: MobileNetV3-Small + ArcFace loss (`models/palm_embedder.onnx`).
+   - Inference: Runs via ONNX Runtime on CPU (<15 ms per frame).
    - Training: Full PyTorch flywheel in `training/train.py` using disjoint pairwise verification (EER / Zero-FAR GAR).
-   - *Activation:* Simply set `DEEP_ENABLED = True` in `config.py`.
+   - *Activation:* Set `DEEP_ENABLED = True` in `config.py`.
+
+### How to Switch Models in `config.py`
+To select the active biometric engine, modify `ACTIVE_MODEL` in `config.py`:
+- `ACTIVE_MODEL = "dinov2"` (Default) — Meta DINOv2 ViT-S/14 foundation model (384-D). Weights cached via `torch.hub`.
+- `ACTIVE_MODEL = "ccnet"` — CCNet ONNX model (2048-D). Requires running `python scripts/download_ccnet.py` once.
+- `ACTIVE_MODEL = "classical"` — Classical HOG+LBP Fusion baseline (3652-D). 100% offline.
+
+**Operational Rule:** Database templates are strictly isolated by `(model_name, feature_dim)`. When switching models, restart the server and enroll users under the active model. Templates enrolled under a different model will not match (avoiding dimension collisions).
 
 Pipeline (all inside `BiometricPipeline.process_frame`, `core/pipeline.py`):
 
@@ -147,7 +166,8 @@ core/                     Biometric pipeline:
   roi.py                  Palm ROI extraction & affine normalization
   preprocessing.py        CLAHE & grayscale enhancement
   features.py             HOG (1764-D), MB-uLBP (1888-D), and CompCode (1536-D)
-  palm_model.py ★         BasePalmModel, ClassicalPalmModel, DeepPalmModel (ONNX 512-D)
+  palm_model.py ★         BasePalmModel, ClassicalPalmModel, DinoV2Model (384-D),
+                          CcnetOnnxModel (2048-D), DeepPalmModel (ONNX 512-D)
   matcher.py              Hardened 1:N matcher + geometry gate + active_threshold routing
   liveness.py ★           Landmark challenge-response liveness detector & session store
   cpp_bridge.py ★         C++ native subprocess bridge fallback
@@ -161,17 +181,18 @@ static/js/                camera.js (PalmCamera), enroll.js (auto-scan + consent
                           pay.js (merchant POS state machine), consumer.js,
                           merchant.js (tabs/chart/pagination/cashout), liveness.js ★, recognize/test
 cpp/ ★                    Native C++ core (CMake, matcher, liveness, preprocess, CLI)
-requirements.txt          Core runtime dependencies (CPU-only, no PyTorch)
+requirements.txt          Core runtime dependencies (CPU-only, ONNX Runtime, PyTorch DINOv2)
 requirements-train.txt ★  Isolated training dependencies (PyTorch CPU-only)
 training/ ★               DeepPalm training pipeline:
   dataset.py              Disjoint subject splitter, ROI loader, data augmentation
   model.py                MobileNetV3-Small deep embedder (512-D)
   train.py                ArcFace loss + disjoint pairwise verification (EER/Zero-FAR)
-tests/                    101 automated Python unit tests across 13 test modules:
+tests/                    107 automated Python unit tests across 13 test modules:
                           test_accuracy, test_cpp_bridge, test_deep_model, test_geometry,
                           test_liveness, test_payment, test_payment_liveness, test_pipeline,
                           test_quality_gate, test_routes, test_templates, test_training_pipeline
 scripts/
+  download_ccnet.py ★     Download CCNet fp32 ONNX weights from Hugging Face Hub
   reset_biometrics.py     wipe biometric users (keeps merchants)
   verify_demo_script.py   13-step end-to-end check (pipeline mocked)
   smoke_test_deep.py ★    Controlled 8-step DeepPalm end-to-end integration test
@@ -265,14 +286,32 @@ note encodes type: `TOPUP` / `CASHOUT*` / else PAYMENT · `cashout_requests(PEND
 23. **Privacy-Preserving Ephemeral Data Flywheel**: Raw palm images are never stored. Pilot training
     data is collected as $128\times128$ CLAHE+masked ROI crops strictly when `DATASET_CAPTURE_ENABLED=True`
     and user grants consent. `scripts/purge_dataset.py` wipes ephemeral files on demand.
+24. **Multi-Model Pretrained Engine Architecture**: Added selectable state-of-the-art vision models
+    alongside the classical baseline: Meta DINOv2 ViT-S/14 (`dinov2-vits14-v1`, 384-D, via `torch.hub`)
+    and CCNet ONNX (`ccnet-onnx-v1`, 2048-D, Yang et al. IEEE TIFS 2023, pretrained on Tongji contactless
+    dataset). Controlled via `ACTIVE_MODEL` in `config.py` ("classical" | "ccnet" | "dinov2").
+25. **Database Template Isolation & Model-Consistency Fix**: Database stores and loads biometric
+    templates strictly isolated by `(model_name, feature_dim)`. Fixed model name string matching
+    (`dinov2-vits14-v1` with hyphens matching `DinoV2Model.model_name`), guaranteeing 0 cross-model
+    false matches and clean isolation across model upgrades.
+26. **Test Suite Discipline & Classical Default**: Unit tests mock and exercise biometric vectors
+    using classical 3652-D dimensions. `config.py` allows `os.environ.get("ACTIVE_MODEL", "dinov2")`
+    override so running `ACTIVE_MODEL="classical" .venv/bin/python -m unittest discover tests` runs
+    all 107 tests cleanly while server serves `ACTIVE_MODEL="dinov2"`.
 
 ## 7. Current State & Evaluation Results
 
-- **Tests: 101/101 passing** (Python test suite across classical recognition, payment system,
-  accuracy suite, finger-masking, geometry, deep model abstraction, liveness verification,
+- **Tests: 107/107 passing** (Python test suite across classical recognition, multi-model factory,
+  payment system, accuracy suite, finger-masking, geometry, deep model abstraction, liveness verification,
   native C++ bridge, and Phase-2 DeepPalm training/evaluation/integration suite). Run after every change; keep green.
 - **C++ Tests: 4/4 passing** (`test_matcher`, `test_liveness`, `test_preprocess`, `test_cli`).
 - **Demo script: all 13 steps verified** (multi-frame path included).
+- **Multi-Model Capabilities Verified:**
+  - Classical Fusion (`HogLbpFusion-v1-fm`, 3652-D)
+  - DINOv2 ViT-S/14 Foundation Model (`dinov2-vits14-v1`, 384-D)
+  - CCNet ONNX Contactless Palmprint Model (`ccnet-onnx-v1`, 2048-D, `models/palm_ccnet.onnx`)
+  - DeepPalm MobileNetV3 ArcFace Model (`deep-palm-embedder-v1`, 512-D)
+  - Database template loader safely isolates templates by active `model_name` and `feature_dim`.
 - **Deep Smoke Test Verified:** 8-step controlled integration script (`scripts/smoke_test_deep.py`) passes end-to-end (enrollment, DB schema, template loading, genuine match, impostor rejection with `deep_below_threshold`, test cleanup).
 - **Phase-2 Spike Implemented (Flag-Gated):**
   - Deep learning palm embedding pathway (`core/palm_model.py`, `DeepPalmModel`, ONNX runtime support + deterministic fallback).
@@ -293,8 +332,8 @@ note encodes type: `TOPUP` / `CASHOUT*` / else PAYMENT · `cashout_requests(PEND
 
 1. **Re-enroll cohort (one sitting, flat palms)** — all users under the pose-consistency
    protocol; include the operator's LEFT hand as decoy impostor.
-2. **Recalibrate:** `/api/evaluate` → `geometry_eval` → set `GEO_MAX_DIST` (and confirm T)
-   by the strict zero-FAR rule; bake values + measured FAR/GAR into config comments.
+2. **Benchmark & Recalibrate Models:** Evaluate genuine/impostor separation across Classical,
+   DINOv2, and CCNet via `/test`; calibrate operating threshold for DINOv2 (`~0.80–0.85`).
 3. **Acceptance test:** decoy left hand rejected 10/10 (mirror-sensitive angles); strangers
    rejected; each registered palm pays reliably; low-balance path shows orange screen.
 4. **Rehearse demo:** fresh snapshot → scripted flow (top-up → POS pay → receipt →

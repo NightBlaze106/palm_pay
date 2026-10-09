@@ -19,9 +19,9 @@ from core.hand_detector import HandDetector
 from core.roi import PalmROIExtractor
 from core.preprocessing import PalmPreprocessor
 from core.features import UniformLBPTable, CompCodeFeatureExtractor
-from core.palm_model import ClassicalPalmModel, get_palm_model
+from core.palm_model import ClassicalPalmModel, get_palm_model, CcnetOnnxModel, DinoV2Model
 from core.matcher import PalmMatcher
-from core.pipeline import BiometricPipeline
+from core.pipeline import BiometricPipeline, build_model
 from database.db import Database
 
 
@@ -178,6 +178,71 @@ class TestBiometricPipeline(unittest.TestCase):
                 os.remove(test_db_path)
             except Exception:
                 pass
+
+    @unittest.skipUnless(
+        os.path.exists(config.CCNET_MODEL_PATH) or os.path.exists("models/palm_ccnet.onnx"),
+        "CCNet model not downloaded",
+    )
+    def test_ccnet_loads_and_shape(self):
+        m = CcnetOnnxModel(config.CCNET_MODEL_PATH)
+        roi = np.random.randint(0, 255, (128, 128), dtype=np.uint8)
+        e = m.extract(roi)
+        self.assertEqual(e.shape, (2048,))
+        self.assertAlmostEqual(float(np.linalg.norm(e)), 1.0, places=3)
+
+    @unittest.skipUnless(
+        os.path.exists(config.CCNET_MODEL_PATH) or os.path.exists("models/palm_ccnet.onnx"),
+        "CCNet model not downloaded",
+    )
+    def test_ccnet_different_inputs_differ(self):
+        m = CcnetOnnxModel(config.CCNET_MODEL_PATH)
+        e1 = m.extract(np.zeros((128, 128), dtype=np.uint8))
+        e2 = m.extract(np.ones((128, 128), dtype=np.uint8) * 128)
+        sim = float(np.dot(e1, e2))
+        self.assertLess(sim, 0.999)
+
+    def test_dinov2_loads_and_shape(self):
+        m = DinoV2Model("dinov2_vits14")
+        roi = np.random.randint(0, 255, (128, 128), dtype=np.uint8)
+        e = m.extract(roi)
+        self.assertEqual(e.shape, (384,))
+        self.assertAlmostEqual(float(np.linalg.norm(e)), 1.0, places=3)
+
+    def test_dinov2_different_inputs_differ(self):
+        m = DinoV2Model("dinov2_vits14")
+        e1 = m.extract(np.zeros((128, 128), dtype=np.uint8))
+        e2 = m.extract(np.ones((128, 128), dtype=np.uint8) * 200)
+        sim = float(np.dot(e1, e2))
+        self.assertLess(sim, 0.999)
+
+    def test_factory_falls_back_to_classical_if_model_missing(self):
+        import config as cfg
+
+        orig = cfg.ACTIVE_MODEL
+        cfg.ACTIVE_MODEL = "ccnet"
+        orig_path = cfg.CCNET_MODEL_PATH
+        cfg.CCNET_MODEL_PATH = "/nonexistent/path/model.onnx"
+        try:
+            m = build_model()
+            self.assertNotIsInstance(m, CcnetOnnxModel)
+        finally:
+            cfg.ACTIVE_MODEL = orig
+            cfg.CCNET_MODEL_PATH = orig_path
+
+    def test_stale_templates_not_returned_for_new_model(self):
+        # enroll one user with classical, switch to dinov2,
+        # verify no templates returned for that user
+        db = Database()
+        db.save_template(
+            user_id=9999,
+            feature_vector=np.zeros(3652, dtype=np.float32),
+            model_name="HogLbpFusion-v1-fm",
+            feature_dim=3652,
+        )
+        templates = db.load_templates(model_name="dinov2-vits14-v1", feature_dim=384)
+        uids = [t["user_id"] for t in templates]
+        self.assertNotIn(9999, uids)
+        db.delete_user(9999)  # cleanup
 
 
 if __name__ == "__main__":

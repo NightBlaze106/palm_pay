@@ -5,6 +5,7 @@ Raw Frame -> Hand Detection -> Palm ROI Extraction -> Affine Normalization -> Pr
 """
 
 import base64
+import os
 import time
 from typing import Dict, Optional, Tuple
 import cv2
@@ -15,7 +16,7 @@ from core.geometry import extract_geometry_features
 from core.hand_detector import HandDetector
 from core.roi import PalmROIExtractor
 from core.preprocessing import PalmPreprocessor
-from core.palm_model import get_palm_model
+from core.palm_model import get_palm_model, build_classical_model
 
 
 def apply_finger_mask(image: np.ndarray, knuckle_y) -> Tuple[np.ndarray, Dict]:
@@ -146,6 +147,50 @@ class FrameQualityGate:
                 "message": "Capture quality OK."}
 
 
+def build_model():
+    if getattr(config, 'DEEP_ENABLED', False):
+        from core.palm_model import DeepPalmModel
+        m = DeepPalmModel()
+        print(f"[PalmPay] Active model: {m.model_name} ({m.feature_dim}-D) [deep]")
+        return m
+
+    active = getattr(config, 'ACTIVE_MODEL', 'classical')
+
+    if active == 'ccnet':
+        path = config.CCNET_MODEL_PATH
+        resolved_path = path if os.path.isabs(path) else os.path.join(config.BASE_DIR, path)
+        if os.path.exists(resolved_path) or os.path.exists(path):
+            actual_path = resolved_path if os.path.exists(resolved_path) else path
+            from core.palm_model import CcnetOnnxModel
+            m = CcnetOnnxModel(actual_path)
+            print(f"[PalmPay] Active model: CCNet ONNX fp32 "
+                  f"({m.feature_dim}-D) — {actual_path}")
+            return m
+        else:
+            print(f"[PalmPay] WARNING: CCNet model not found at {path}. "
+                  f"Falling back to classical.")
+            active = 'classical'
+
+    if active == 'dinov2':
+        variant = getattr(config, 'DINOV2_VARIANT', 'dinov2_vits14')
+        try:
+            from core.palm_model import DinoV2Model
+            m = DinoV2Model(variant)
+            print(f"[PalmPay] Active model: DINOv2 {variant} "
+                  f"({m.feature_dim}-D)")
+            return m
+        except Exception as e:
+            print(f"[PalmPay] WARNING: DINOv2 failed ({e}). "
+                  f"Falling back to classical.")
+            active = 'classical'
+
+    # classical fallback
+    m = build_classical_model()   # existing call, unchanged
+    print(f"[PalmPay] Active model: {m.model_name} "
+          f"({m.feature_dim}-D) [classical]")
+    return m
+
+
 class BiometricPipeline:
     """
     Complete end-to-end contactless palm recognition pipeline.
@@ -155,20 +200,17 @@ class BiometricPipeline:
         self.hand_detector = HandDetector()
         self.roi_extractor = PalmROIExtractor()
         self.preprocessor = PalmPreprocessor()
-        self.model = get_palm_model()
+        self.model = build_model()
         self.quality_gate = FrameQualityGate()
 
     def reload_model(self):
         """Reloads the active palm biometric model according to current configuration."""
-        self.model = get_palm_model()
+        self.model = build_model()
         return self.model
 
     def _sync_model(self):
-        """Ensures self.model reflects current config.DEEP_ENABLED state."""
-        from core.palm_model import DeepPalmModel
-        is_deep = getattr(config, "DEEP_ENABLED", False)
-        if (is_deep and not isinstance(self.model, DeepPalmModel)) or (not is_deep and isinstance(self.model, DeepPalmModel)):
-            self.reload_model()
+        """Ensures self.model reflects current configuration state."""
+        self.reload_model()
 
     @staticmethod
     def encode_image_to_base64(image_array: np.ndarray, format_ext: str = ".jpg") -> str:

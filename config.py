@@ -225,3 +225,13 @@ NATIVE_CPP_BIN = "cpp/build/palmpay_native"
 DATASET_CAPTURE_ENABLED = False
 DATASET_DIR = os.path.join(BASE_DIR, "data", "pilot_rois")
 
+# ── Model selection ──────────────────────────────────────────────────
+# Options: "classical" | "ccnet" | "dinov2"
+ACTIVE_MODEL = "dinov2"
+
+
+# CCNet ONNX (fp32)
+CCNET_MODEL_PATH = "models/palm_ccnet.onnx"
+
+# DINOv2 — model variant: "dinov2_vits14" (384-D) or "dinov2_vitb14" (768-D)
+DINOV2_VARIANT = "dinov2_vits14"

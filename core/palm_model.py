@@ -45,6 +45,10 @@ class ClassicalPalmModel(BasePalmModel):
             self.extractor = CompCodeFeatureExtractor()
             
         self.model_name = config.MODEL_NAME
+        self.feature_dim = self.extractor.expected_dim
+
+    def extract(self, roi_gray_uint8: np.ndarray) -> np.ndarray:
+        return self.extract_embedding(roi_gray_uint8)
 
     def extract_embedding(self, preprocessed_roi: np.ndarray) -> np.ndarray:
         return self.extractor.extract_features(preprocessed_roi)
@@ -189,6 +193,127 @@ class DeepPalmModel(BasePalmModel):
 
     def get_model_name(self) -> str:
         return self.model_name
+
+def build_classical_model() -> ClassicalPalmModel:
+    return ClassicalPalmModel()
+
+
+class CcnetOnnxModel(BasePalmModel):
+    model_name = "ccnet-onnx-v1"
+    feature_dim = 2048
+
+    def __init__(self, model_path: str):
+        import onnxruntime as ort
+        resolved_path = model_path
+        if not os.path.isabs(resolved_path):
+            resolved_path = os.path.join(config.BASE_DIR, resolved_path)
+        self.model_path = resolved_path
+        self.session = ort.InferenceSession(
+            resolved_path,
+            providers=["CPUExecutionProvider"]
+        )
+        self.input_name = self.session.get_inputs()[0].name
+
+    def extract(self, roi_gray_uint8: np.ndarray) -> np.ndarray:
+        # roi is 128x128 uint8 grayscale already CLAHE-processed
+        # do NOT re-apply CLAHE
+        if roi_gray_uint8 is None or roi_gray_uint8.size == 0:
+            vec = np.zeros(self.feature_dim, dtype=np.float32)
+            vec[0] = 1.0
+            return vec
+
+        img = roi_gray_uint8
+        if img.ndim == 3 and img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if img.shape[0] != 128 or img.shape[1] != 128:
+            img = cv2.resize(img, (128, 128), interpolation=cv2.INTER_AREA)
+
+        x = img.astype(np.float32) / 255.0
+        x = x[np.newaxis, np.newaxis, :, :]        # [1,1,128,128]
+        out = self.session.run(None, {self.input_name: x})[0]
+        emb = out.squeeze().astype(np.float32)
+        norm = np.linalg.norm(emb)
+        if norm > 1e-6:
+            emb = emb / norm
+        else:
+            emb = np.zeros(self.feature_dim, dtype=np.float32)
+            emb[0] = 1.0
+        return emb
+
+    def extract_embedding(self, preprocessed_roi: np.ndarray) -> np.ndarray:
+        return self.extract(preprocessed_roi)
+
+    def get_feature_dim(self) -> int:
+        return self.feature_dim
+
+    def get_model_name(self) -> str:
+        return self.model_name
+
+
+class DinoV2Model(BasePalmModel):
+    model_name = "dinov2-vits14-v1"
+    feature_dim = 384
+
+    MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+    def __init__(self, variant: str = "dinov2_vits14"):
+        import torch
+        self.variant = variant
+        if variant == "dinov2_vitb14":
+            self.model_name = "dinov2-vitb14-v1"
+            self.feature_dim = 768
+        else:
+            self.model_name = "dinov2-vits14-v1"
+            self.feature_dim = 384
+
+        self.torch = torch
+        self.model = torch.hub.load(
+            "facebookresearch/dinov2",
+            variant,
+            pretrained=True,
+        )
+        self.model.eval()
+        self.model = self.model.cpu()
+
+    def extract(self, roi_gray_uint8: np.ndarray) -> np.ndarray:
+        import cv2
+        if roi_gray_uint8 is None or roi_gray_uint8.size == 0:
+            vec = np.zeros(self.feature_dim, dtype=np.float32)
+            vec[0] = 1.0
+            return vec
+
+        img = roi_gray_uint8
+        if img.ndim == 3 and img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        img = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LINEAR)
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+
+        x = img.astype(np.float32) / 255.0
+        x = (x - self.MEAN) / self.STD
+        x = np.transpose(x, (2, 0, 1))
+        t = self.torch.tensor(x).unsqueeze(0)
+        with self.torch.no_grad():
+            emb = self.model(t)
+        emb = emb.squeeze().cpu().numpy().astype(np.float32)
+        norm = np.linalg.norm(emb)
+        if norm > 1e-6:
+            emb = emb / norm
+        else:
+            emb = np.zeros(self.feature_dim, dtype=np.float32)
+            emb[0] = 1.0
+        return emb
+
+    def extract_embedding(self, preprocessed_roi: np.ndarray) -> np.ndarray:
+        return self.extract(preprocessed_roi)
+
+    def get_feature_dim(self) -> int:
+        return self.feature_dim
+
+    def get_model_name(self) -> str:
+        return self.model_name
+
 
 def get_palm_model() -> BasePalmModel:
     """

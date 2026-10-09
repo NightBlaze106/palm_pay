@@ -34,6 +34,7 @@ Goal: protect against catastrophic failure in front of an audience.
 **Gate to Phase 2:** 0 observed false-accepts across ~2,000 transactions · FRR <5% · median pay <5s.
 
 ## Phase 2 — Robustness engineering (next semester)
+- Multi-model architecture: Foundation vision transformers (Meta DINOv2 ViT-S/14), domain-specific contactless palmprint networks (CCNet ONNX), and custom MobileNetV3 ArcFace metric embeddings via `BasePalmModel` swap
 - Deep embeddings trained on pilot data (lighting/pose augmentation) via existing `BasePalmModel` swap
 - Challenge-response liveness → cancelable biometric templates → encrypted storage (SQLCipher)
 - Postgres migration; double-entry ledger refactor; automated recalibration cadence (~every 10× users)

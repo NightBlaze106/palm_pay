@@ -8,4 +8,5 @@ data/dataset/
 data/pilot_rois/
 cpp/build/
 models/palm_embedder.onnx
+models/palm_ccnet.onnx
 models/checkpoints/

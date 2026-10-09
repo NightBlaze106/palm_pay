@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import os
 import sqlite3
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 import config
@@ -232,7 +232,7 @@ class Database:
             return False
 
         if model_name is None:
-            model_name = config.DEEP_MODEL_NAME if getattr(config, "DEEP_ENABLED", False) else config.MODEL_NAME
+            model_name, _ = self._get_active_model_info()
 
         conn = self.get_connection()
         try:
@@ -257,6 +257,88 @@ class Database:
             return True
         except Exception:
             return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _get_active_model_info() -> Tuple[str, int]:
+        active = getattr(config, "ACTIVE_MODEL", "classical")
+        if active == "dinov2":
+            variant = getattr(config, "DINOV2_VARIANT", "dinov2_vits14")
+            model_name = "dinov2-vitb14-v1" if variant == "dinov2_vitb14" else "dinov2-vits14-v1"
+            dim = 768 if variant == "dinov2_vitb14" else 384
+            return model_name, dim
+        elif active == "ccnet":
+            return "ccnet-onnx-v1", 2048
+        elif getattr(config, "DEEP_ENABLED", False):
+            return getattr(config, "DEEP_MODEL_NAME", "deep-palm-embedder-v1"), getattr(config, "DEEP_FEATURE_DIM", 512)
+        else:
+            return config.MODEL_NAME, config.FEATURE_VECTOR_DIM
+
+    def save_template(
+        self,
+        user_id: int,
+        feature_vector: np.ndarray,
+        model_name: Optional[str] = None,
+        feature_dim: Optional[int] = None,
+    ) -> bool:
+        """Stores a single feature template vector for a user."""
+        dim = feature_dim if feature_dim is not None else len(feature_vector)
+        mname = model_name or self._get_active_model_info()[0]
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            blob = self.serialize_vector(feature_vector)
+            cursor.execute(
+                """
+                INSERT INTO templates (user_id, sample_index, feature_blob, feature_dim, model_name, created_at)
+                VALUES (?, 1, ?, ?, ?, ?)
+                """,
+                (user_id, blob, dim, mname, self._now_iso()),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+    def load_templates(
+        self,
+        model_name: Optional[str] = None,
+        feature_dim: Optional[int] = None,
+    ) -> List[Dict]:
+        """Loads all stored templates matching model_name and feature_dim."""
+        active_name, active_dim = self._get_active_model_info()
+        target_name = model_name or active_name
+        target_dim = feature_dim or active_dim
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, user_id, sample_index, feature_blob, feature_dim, model_name
+                FROM templates
+                WHERE feature_dim = ? AND model_name = ?
+                ORDER BY user_id, sample_index ASC
+                """,
+                (target_dim, target_name),
+            )
+            results = []
+            for row in cursor.fetchall():
+                vec = self.deserialize_vector(row["feature_blob"], row["feature_dim"])
+                results.append(
+                    {
+                        "id": row["id"],
+                        "user_id": row["user_id"],
+                        "sample_index": row["sample_index"],
+                        "feature_vector": vec,
+                        "template": vec,
+                        "model_name": row["model_name"],
+                        "feature_dim": row["feature_dim"],
+                    }
+                )
+            return results
         finally:
             conn.close()
 
@@ -304,10 +386,11 @@ class Database:
         Retrieves all enrolled users along with their deserialized template embeddings.
         Filters by model_name and feature_dim (defaulting to current config / deep model).
         """
+        active_name, active_dim = self._get_active_model_info()
         if model_name is None:
-            model_name = config.DEEP_MODEL_NAME if getattr(config, "DEEP_ENABLED", False) else config.MODEL_NAME
+            model_name = active_name
         if feature_dim is None:
-            feature_dim = config.DEEP_FEATURE_DIM if getattr(config, "DEEP_ENABLED", False) else config.FEATURE_VECTOR_DIM
+            feature_dim = active_dim
 
         users_map = {}
         conn = self.get_connection()
