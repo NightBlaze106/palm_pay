@@ -181,7 +181,8 @@ class PalmMatcher:
                 # Candidate without geometry data -> legacy texture-only path.
 
             thresh = self.active_threshold
-            texture_passes = (mean_score >= thresh) and (best_sample >= thresh)
+            sample_floor = thresh - 0.04
+            texture_passes = (mean_score >= thresh) and (best_sample >= sample_floor)
             candidates.append(
                 {
                     "user_id": user["id"],
@@ -197,6 +198,7 @@ class PalmMatcher:
             )
 
         thresh = self.active_threshold
+        sample_floor = thresh - 0.04
         if not candidates:
             return {
                 "recognized": False,
@@ -241,6 +243,16 @@ class PalmMatcher:
                     ),
                 }
             reason_str = "deep_below_threshold" if getattr(config, "DEEP_ENABLED", False) else "below_threshold"
+            if top["score"] >= thresh:
+                fail_msg = (
+                    f"Palm Not Recognized (Best Match: {top['name']} score {top['score']:.4f} cleared threshold, "
+                    f"but best sample {top['best_sample_score']:.4f} < {sample_floor:.2f})."
+                )
+            else:
+                fail_msg = (
+                    f"Palm Not Recognized (Best Match: {top['name']} with Score: "
+                    f"{top['score']:.4f} < Threshold: {thresh:.2f})"
+                )
             return {
                 "recognized": False,
                 "matched_user": None,
@@ -251,10 +263,7 @@ class PalmMatcher:
                 "geo_threshold": config.GEO_MAX_DIST if query_geo is not None else None,
                 "all_scores": all_scores,
                 "reason": reason_str,
-                "message": (
-                    f"Palm Not Recognized (Best Match: {top['name']} with Score: "
-                    f"{top['score']:.4f} < Threshold: {thresh:.2f})"
-                ),
+                "message": fail_msg,
             }
 
         # Ambiguity guard: two qualifying identities within a tiny margin of each

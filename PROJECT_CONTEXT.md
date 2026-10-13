@@ -27,7 +27,7 @@ recognizes and debits automatically. Everything labeled **Demo / Prototype** —
 # Run server (port 5001, debug on, reloader OFF → restart manually after edits):
 .venv/bin/python app.py                      # http://127.0.0.1:5001
 
-# Tests (107 total Python tests + 4 C++ tests, must always be green):
+# Tests (113 total Python tests + 4 C++ tests, must always be green):
 ACTIVE_MODEL="classical" .venv/bin/python -m unittest discover tests
 ctest --test-dir cpp/build --output-on-failure
 

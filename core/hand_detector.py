@@ -153,12 +153,21 @@ class HandDetector:
             landmarks_pixel.append((px_x, px_y, float(lm.z)))
             landmarks_normalized.append((float(lm.x), float(lm.y), float(lm.z)))
 
+        # Check boundary clipping for palm-critical anchors (wrist, index MCP, pinky MCP)
+        edge_margin = 0.02
+        critical_lms = [primary_landmarks[0], primary_landmarks[5], primary_landmarks[17]]
+        is_edge_clipped = any(
+            lm.x <= edge_margin or lm.x >= 1.0 - edge_margin or lm.y <= edge_margin or lm.y >= 1.0 - edge_margin
+            for lm in critical_lms
+        )
+
         return {
             "detected": True,
             "landmarks_pixel": landmarks_pixel,
             "landmarks_normalized": landmarks_normalized,
             "handedness": handedness_label,
             "score": score,
+            "is_edge_clipped": is_edge_clipped,
             "message": "Hand landmarks successfully extracted.",
         }
 

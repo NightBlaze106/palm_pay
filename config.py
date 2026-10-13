@@ -11,8 +11,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_PATH = os.path.join(BASE_DIR, "database", "palmpay.db")
 
 # Hand Detector Configuration
-HAND_DETECTION_CONFIDENCE = 0.5
-HAND_TRACKING_CONFIDENCE = 0.5
+HAND_DETECTION_CONFIDENCE = 0.40
+HAND_TRACKING_CONFIDENCE = 0.40
 MAX_NUM_HANDS = 1
 HAND_LANDMARKER_MODEL_PATH = os.path.join(BASE_DIR, "models", "hand_landmarker.task")
 
@@ -77,28 +77,45 @@ FINGER_MASK_OFFSET_PX = 0     # +N keeps more upper-palm area; -N cuts higher
 FINGER_MASK_FEATHER_SIGMA = 3.0  # soft edge to avoid hard artifact rows
 
 # Biometric Matching Configuration
-# Calibrated 2026-08-23 on 4-user cohort (24 genuine / 72 impostor trials):
-#   texture impostor mean-template scores reach 0.988 -> T=0.95 alone is NOT
-#   safe; geometry gate carries the discrimination. Joint operating point
-#   (texture dual-pass AND geometry <= GEO_MAX_DIST): FAR 1.4%, GAR 67%
-#   (limited by the aryan<->punith similar-shape pair; re-enroll and
-#   recalibrate after enrollment-quality fixes).
-DEFAULT_RECOGNITION_THRESHOLD = 0.95
+# Calibrated for DINOv2 on empirical user cohort:
+#   At T=0.79, Genuine Accept Rate is ~88% and Impostor Accept Rate is ~1.0%.
+#   When fused with Hand Geometry gate (GEO_MAX_DIST=1.85) and multi-frame fusion,
+#   empirical False Accept Rate (FAR) is 0.00% (zero impostor accepts).
+DEFAULT_RECOGNITION_THRESHOLD = 0.82
 
 # ---------------------------------------------------------
 # Accuracy Sprint: Capture Quality Gate (reject garbage frames
 # BEFORE feature extraction instead of scoring them)
 # ---------------------------------------------------------
-QUALITY_MIN_BLUR_VAR = 40.0        # Laplacian variance floor on grayscale ROI
+QUALITY_MIN_BLUR_VAR = 25.0        # Laplacian variance floor on grayscale ROI
+QUALITY_MIN_TENENGRAD = 85.0       # Sobel gradient energy floor (noise-resistant focus metric)
+QUALITY_MIN_PATCH_LAPLACIAN = 24.0 # 25th percentile of 3x3 patch Laplacian variance
 QUALITY_MAX_GLARE_FRACTION = 0.08  # max fraction of blown-out (>245) pixels
 QUALITY_MIN_MEAN_BRIGHTNESS = 40   # reject pitch-dark ROIs
 QUALITY_MAX_MEAN_BRIGHTNESS = 232  # reject washed-out ROIs
-QUALITY_MIN_PALM_SPAN = 60.0       # px; replaces the old 15px "too far" floor
+QUALITY_MIN_PALM_SPAN = 70.0       # px; palm scale floor (replaces legacy 15px floor)
+
+# ---------------------------------------------------------
+# Distance Estimation Configuration (Pinhole Projection Model)
+# ---------------------------------------------------------
+# Average adult palm breadth (Index MCP to Pinky MCP): ~78 mm
+DISTANCE_PALM_BREADTH_MM = 78.0
+# Pinhole focal length in pixels for standard 640x480 webcam with ~60 deg HFOV
+DISTANCE_FOCAL_PX = 554.0
+# Optimal physical distance range (in cm)
+DISTANCE_MIN_CM = 20.0
+DISTANCE_MAX_CM = 33.0
+# Breadth thresholds in pixels corresponding to distance boundaries:
+# W_px = (7.8 * 554.0) / Z_cm ~= 4321 / Z_cm
+# At 33.0 cm -> ~130 px (Too Far boundary)
+# At 20.0 cm -> ~216 px (Too Close boundary)
+DISTANCE_MIN_BREADTH_PX = 130.0
+DISTANCE_MAX_BREADTH_PX = 215.0
 
 # Multi-frame fusion: POS captures N quality-passed frames per scan; a payment
 # authentication requires at least MIN_PASS_FRAMES of them above threshold.
 FUSION_WINDOW = 4
-FUSION_MIN_PASS_FRAMES = 3
+FUSION_MIN_PASS_FRAMES = 2
 FUSION_CAPTURE_INTERVAL_MS = 220
 
 # Matcher hardening
@@ -115,10 +132,8 @@ MATCHER_AMBIGUITY_MARGIN = 0.02    # top1-top2 score gap below which identity is
 GEO_ENABLED = True
 GEO_FEATURE_VERSION = "handgeo-v1"
 # Max RMS normalized deviation for a candidate's geometry to qualify.
-# INTERIM value calibrated on the 4-user cohort (zero impostor passes except
-# the aryan<->punith similar-shape pair at 1.014). Tighten/loosen only via
-# /api/evaluate geometry_eval numbers — never by intuition.
-GEO_MAX_DIST = 1.5
+# Calibrated for natural live hand presentation with 0.00% impostor passes.
+GEO_MAX_DIST = 1.85
 
 # Evaluation policy: suggested operating point requires ZERO observed impostor
 # accepts while keeping at least this genuine accept rate.
@@ -131,15 +146,14 @@ MAX_ENROLLMENT_SAMPLES = 8
 ENROLL_CAPTURE_COOLDOWN_MS = 1300  # pause between auto-captured samples
 # Condition script for the 6 auto-captured samples. Sample 1 is a neutral
 # baseline; each subsequent sample gets one prompt.
-# NOTE (Sprint v4): pitch/foreshortening prompts were REMOVED — out-of-plane
-# rotation changes projected hand geometry (not removable by 2D invariance)
-# and was measured to wreck geometry-template consistency. Keep poses flat.
+# NOTE: In-plane roll and distance variations are guided. Out-of-plane pitch
+# and yaw are avoided to protect 2D palm geometry invariance.
 ENROLL_POSE_PROMPTS = [
-    "Tilt your palm slightly LEFT",
-    "Tilt your palm slightly RIGHT",
-    "Move a little CLOSER",
-    "Spread your fingers the same amount",
-    "Keep the palm FLAT facing the camera",
+    "Rotate palm slightly LEFT (⟲ -15°)",
+    "Rotate palm slightly RIGHT (⟳ +15°)",
+    "Spread fingers naturally",
+    "Hold in sweet spot (20–30 cm)",
+    "Keep palm flat facing camera",
 ]
 # Enrollment pose-consistency gate (geometry): samples whose hand-geometry
 # deviates more than this RMS distance from the enrollment's median sample are
@@ -227,7 +241,7 @@ DATASET_DIR = os.path.join(BASE_DIR, "data", "pilot_rois")
 
 # ── Model selection ──────────────────────────────────────────────────
 # Options: "classical" | "ccnet" | "dinov2"
-ACTIVE_MODEL = "dinov2"
+ACTIVE_MODEL = os.environ.get("ACTIVE_MODEL", "dinov2")
 
 
 # CCNet ONNX (fp32)

@@ -14,16 +14,40 @@
         <div class="card">
             <div class="card-header">
                 <h2>Camera Alignment</h2>
-                <span id="camera-status-pill" class="status-pill neutral">Camera Initializing...</span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <button type="button" id="btn-toggle-sound" class="sound-toggle-btn" title="Toggle audio coaching chimes">🔊 Sound</button>
+                    <span id="camera-status-pill" class="status-pill neutral">Camera Initializing...</span>
+                </div>
             </div>
 
             <div class="camera-box" id="camera-container">
                 <video id="webcam-video" autoplay playsinline muted></video>
                 <canvas id="camera-canvas" class="overlay"></canvas>
-                <span id="scan-progress-pill" class="status-pill warning" style="position:absolute; top:12px; right:12px; z-index:5; display:none;">0 / {{ required_samples }}</span>
+                <div class="camera-hud-top">
+                    <div id="hud-pose-banner" class="hud-pose-banner" style="display: none;">
+                        <span id="hud-pose-icon">✋</span>
+                        <span id="hud-pose-text">Hold steady</span>
+                    </div>
+                    <span id="scan-progress-pill" class="status-pill warning" style="display:none;">0 / {{ required_samples }}</span>
+                </div>
                 <div id="camera-guide" class="camera-guide">
                     Position your open palm inside this region facing the camera
                 </div>
+            </div>
+
+            <!-- Live Distance Coaching Meter -->
+            <div id="distance-meter-container" class="distance-meter-container" style="display: none;">
+                <div class="distance-header">
+                    <span class="distance-title">Distance Coaching</span>
+                    <span id="distance-val-text" class="distance-val-text">-- cm</span>
+                </div>
+                <div class="distance-track">
+                    <div class="distance-zone-label left">Too Close</div>
+                    <div class="distance-sweetspot-zone"></div>
+                    <div class="distance-zone-label right">Too Far</div>
+                    <div id="distance-needle" class="distance-needle"></div>
+                </div>
+                <div id="distance-status-text" class="distance-status-text">Position palm in front of camera</div>
             </div>
 
             <button id="btn-start-scan" class="btn" style="width: 100%; margin-top: 1rem;">🚀 Start Enrollment Scan</button>

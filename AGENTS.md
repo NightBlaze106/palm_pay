@@ -18,5 +18,5 @@
 - Relaunch detached: `setsid .venv/bin/python app.py > /tmp/opencode/palmpay_server.log 2>&1 < /dev/null & disown; exit 0`
 
 ## Project discipline
-- Tests must stay green after every change: `ACTIVE_MODEL="classical" .venv/bin/python -m unittest discover tests` (107 tests; 4 C++ tests via `ctest --test-dir cpp/build`).
+- Tests must stay green after every change: `ACTIVE_MODEL="classical" .venv/bin/python -m unittest discover tests` (113 tests; 4 C++ tests via `ctest --test-dir cpp/build`).
 - Never store raw palm images; thresholds calibrated empirically, never guessed (see PROJECT_CONTEXT.md §6).

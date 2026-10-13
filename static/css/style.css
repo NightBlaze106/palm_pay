@@ -259,6 +259,156 @@ p.subtitle {
   color: var(--success);
 }
 
+/* Guided Enrollment HUD */
+.camera-hud-top {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.hud-pose-banner {
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+  padding: 0.35rem 0.85rem;
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: all 0.25s ease;
+}
+
+.hud-pose-banner.sweet-spot {
+  border-color: #10b981;
+  background: rgba(6, 78, 59, 0.9);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.6);
+}
+
+.sound-toggle-btn {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: all 0.2s ease;
+}
+.sound-toggle-btn:hover {
+  background: rgba(15, 23, 42, 0.95);
+  color: #fff;
+}
+
+.distance-meter-container {
+  margin-top: 0.75rem;
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-sm, 6px);
+  padding: 0.65rem 0.85rem;
+}
+
+.distance-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  margin-bottom: 0.4rem;
+}
+
+.distance-title {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.distance-val-text {
+  font-weight: 700;
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+.distance-track {
+  position: relative;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+  overflow: visible;
+  margin: 0.75rem 0 0.4rem 0;
+  display: flex;
+  align-items: center;
+}
+
+.distance-zone-label {
+  position: absolute;
+  top: -14px;
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.distance-zone-label.left { left: 4px; }
+.distance-zone-label.right { right: 4px; }
+
+.distance-sweetspot-zone {
+  position: absolute;
+  left: 30%;
+  width: 40%;
+  height: 100%;
+  background: rgba(16, 185, 129, 0.25);
+  border-left: 2px solid #10b981;
+  border-right: 2px solid #10b981;
+  border-radius: 2px;
+}
+
+.distance-needle {
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 18px;
+  height: 18px;
+  background: #38bdf8;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+  transition: left 0.15s ease-out, background-color 0.2s ease;
+  z-index: 2;
+}
+
+.distance-needle.optimal {
+  background: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.9);
+}
+
+.distance-needle.warning {
+  background: #f59e0b;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.8);
+}
+
+.distance-needle.danger {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.8);
+}
+
+.distance-status-text {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-align: center;
+  font-weight: 500;
+}
+
 /* Status & Indicators */
 .status-pill {
   display: inline-flex;

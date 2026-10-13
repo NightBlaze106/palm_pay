@@ -381,11 +381,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showAuthFail(message) {
+        const text = esc(message || 'Palm not recognized — try again');
         el.resultPanel.innerHTML = `
-            <div class="auth-fail-banner">✗ Palm not recognized — try again</div>`;
+            <div class="auth-fail-banner">✗ ${text}</div>`;
         el.resultPanel.style.display = 'block';
-        setTimeout(() => { if (mode === 'sale') { el.resultPanel.style.display = 'none'; } }, 2600);
-        void message;
+        setTimeout(() => { if (mode === 'sale') { el.resultPanel.style.display = 'none'; } }, 3200);
     }
 
     // ---- helpers ----

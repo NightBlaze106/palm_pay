@@ -933,6 +933,13 @@ def api_process_frame():
             "roi_extracted": result["roi_extracted"],
             "roi_polygon": result["roi_polygon"],
             "latency_ms": result["latency_ms"],
+            "distance_cm": result.get("distance_cm"),
+            "distance_zone": result.get("distance_zone", "unknown"),
+            "palm_center": result.get("palm_center"),
+            "palm_breadth_px": result.get("palm_breadth_px", 0.0),
+            "in_sweet_spot": bool(result.get("in_sweet_spot", False)),
+            "quality_reason": result.get("quality_reason"),
+            "quality_metrics": result.get("quality_metrics", {}),
             "preview_roi_b64": result["preview_roi_bgr_b64"],
             "preview_enhanced_b64": result["preview_enhanced_b64"],
             "preview_annotated_b64": result["preview_annotated_b64"],
@@ -1182,6 +1189,12 @@ def api_recognize():
                 "recognized": False,
                 "hand_detected": bool(res.get("hand_detected")),
                 "roi_extracted": bool(res.get("roi_extracted")),
+                "distance_cm": res.get("distance_cm"),
+                "distance_zone": res.get("distance_zone", "unknown"),
+                "palm_center": res.get("palm_center"),
+                "palm_breadth_px": res.get("palm_breadth_px", 0.0),
+                "in_sweet_spot": bool(res.get("in_sweet_spot", False)),
+                "roi_polygon": res.get("roi_polygon", []),
                 "matched_user": None,
                 "similarity_score": 0.0,
                 "threshold_used": matcher.threshold,
@@ -1228,9 +1241,10 @@ def api_recognize():
     t_match_start = time.perf_counter()
     enrolled_users = db.get_all_users_with_templates()
     match_res = matcher.match_1_to_n(mean_query, enrolled_users, query_geometry=query_geometry)
+    frame_thresh = matcher.threshold - 0.02
     frames_above = sum(
         1 for f in ok_frames
-        if matcher.frame_pass_score(f["embedding"], enrolled_users) >= matcher.threshold
+        if matcher.frame_pass_score(f["embedding"], enrolled_users) >= frame_thresh
     )
     matching_lat = (time.perf_counter() - t_match_start) * 1000.0
     total_lat = (time.perf_counter() - start_total) * 1000.0
@@ -1268,12 +1282,47 @@ def api_recognize():
         biometric_sessions.invalidate(prev_bio_token)
         session.pop("bio_token", None)
 
+    # Research Paper Data Recording: Log trial result to empirical_trials.csv
+    try:
+        log_dir = os.path.join(config.BASE_DIR, "data")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "empirical_trials.csv")
+        file_exists = os.path.isfile(log_file)
+        with open(log_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow([
+                    "timestamp", "recognized", "user_name", "similarity_score",
+                    "threshold", "frames_above", "frames_passed", "geo_distance",
+                    "distance_cm", "match_reason"
+                ])
+            writer.writerow([
+                datetime.utcnow().isoformat(),
+                bool(match_res["recognized"]),
+                match_res["matched_user"]["name"] if match_res.get("matched_user") else (match_res.get("best_candidate") or {}).get("name", "none"),
+                match_res["similarity_score"],
+                match_res["threshold_used"],
+                frames_above,
+                len(ok_frames),
+                match_res.get("geo_distance", ""),
+                first_res.get("distance_cm", ""),
+                match_res.get("reason", "ok" if match_res["recognized"] else "unknown")
+            ])
+    except Exception as exc:
+        print(f"[PalmPay] Trial logger error: {exc}")
+
     return jsonify(
         {
             "success": True,
             "recognized": match_res["recognized"],
             "hand_detected": True,
             "roi_extracted": True,
+            "distance_cm": first_res.get("distance_cm"),
+            "distance_zone": first_res.get("distance_zone", "optimal"),
+            "palm_center": first_res.get("palm_center"),
+            "palm_breadth_px": first_res.get("palm_breadth_px", 0.0),
+            "in_sweet_spot": bool(first_res.get("in_sweet_spot", False)),
+            "roi_polygon": first_res.get("roi_polygon", []),
             "matched_user": match_res["matched_user"],
             "best_candidate": match_res.get("best_candidate"),
             "similarity_score": match_res["similarity_score"],

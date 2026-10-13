@@ -71,6 +71,75 @@ def apply_finger_mask(image: np.ndarray, knuckle_y) -> Tuple[np.ndarray, Dict]:
     return out, info
 
 
+def evaluate_palm_sharpness(
+    gray_roi: np.ndarray,
+    min_tenengrad: float = config.QUALITY_MIN_TENENGRAD,
+    min_patch_laplacian: float = config.QUALITY_MIN_PATCH_LAPLACIAN,
+    fallback_blur_var: float = config.QUALITY_MIN_BLUR_VAR,
+) -> Tuple[bool, Dict, str]:
+    """
+    Evaluates palm ROI sharpness using noise-resistant Tenengrad gradient energy
+    and 3x3 patch-based Laplacian variance.
+
+    Returns:
+        (passed, metrics_dict, message)
+    """
+    if gray_roi is None or gray_roi.size == 0:
+        return False, {"tenengrad": 0.0, "patch_laplacian_q25": 0.0, "blur_var": 0.0}, "Empty ROI"
+
+    blur_var = float(cv2.Laplacian(gray_roi, cv2.CV_64F).var())
+
+    # Tenengrad focus measure (Sobel gradient magnitude energy)
+    gx = cv2.Sobel(gray_roi, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray_roi, cv2.CV_32F, 0, 1, ksize=3)
+    tenengrad = float(np.mean(gx**2 + gy**2))
+
+    # 3x3 patch Laplacian distribution (detects local blur across central palm)
+    h, w = gray_roi.shape[:2]
+    ph, pw = max(1, h // 3), max(1, w // 3)
+    patch_vars = []
+    for r in range(3):
+        for c in range(3):
+            patch = gray_roi[r * ph : (r + 1) * ph, c * pw : (c + 1) * pw]
+            if patch.size > 0:
+                patch_vars.append(float(cv2.Laplacian(patch, cv2.CV_64F).var()))
+
+    patch_q25 = float(np.percentile(patch_vars, 25)) if patch_vars else blur_var
+
+    metrics = {
+        "blur_var": round(blur_var, 1),
+        "tenengrad": round(tenengrad, 1),
+        "patch_laplacian_q25": round(patch_q25, 1),
+    }
+
+    # Pass condition: either dual-metric passes OR global blur_var meets fallback
+    passed = (tenengrad >= min_tenengrad and patch_q25 >= min_patch_laplacian) or (blur_var >= fallback_blur_var)
+    msg = "Sharpness OK." if passed else "Image too blurry — hold palm steady."
+    return passed, metrics, msg
+
+
+def estimate_palm_distance(palm_breadth_px: float) -> Tuple[float, str, str]:
+    """
+    Estimates physical distance from camera lens using anthropometric palm breadth.
+    Formula: Z_cm = (DISTANCE_PALM_BREADTH_MM * DISTANCE_FOCAL_PX) / (palm_breadth_px * 10)
+    Returns:
+        (distance_cm, zone, coaching_message)
+        zone: "too_far" | "optimal" | "too_close" | "unknown"
+    """
+    if palm_breadth_px is None or palm_breadth_px <= 5.0:
+        return 999.0, "too_far", "Move palm closer to camera."
+
+    k_constant = (config.DISTANCE_PALM_BREADTH_MM / 10.0) * config.DISTANCE_FOCAL_PX
+    dist_cm = round(k_constant / palm_breadth_px, 1)
+
+    if palm_breadth_px < config.DISTANCE_MIN_BREADTH_PX:
+        return dist_cm, "too_far", "Move palm closer to camera."
+    elif palm_breadth_px > config.DISTANCE_MAX_BREADTH_PX:
+        return dist_cm, "too_close", "Move palm slightly back."
+    else:
+        return dist_cm, "optimal", "Ideal distance — hold steady."
+
+
 class FrameQualityGate:
     """
     Capture Quality Gate (Accuracy Sprint).
@@ -88,44 +157,83 @@ class FrameQualityGate:
         min_brightness: int = config.QUALITY_MIN_MEAN_BRIGHTNESS,
         max_brightness: int = config.QUALITY_MAX_MEAN_BRIGHTNESS,
         min_palm_span: float = config.QUALITY_MIN_PALM_SPAN,
+        min_tenengrad: float = config.QUALITY_MIN_TENENGRAD,
+        min_patch_laplacian: float = config.QUALITY_MIN_PATCH_LAPLACIAN,
     ):
         self.min_blur_var = float(min_blur_var)
         self.max_glare_fraction = float(max_glare_fraction)
         self.min_brightness = int(min_brightness)
         self.max_brightness = int(max_brightness)
         self.min_palm_span = float(min_palm_span)
+        self.min_tenengrad = float(min_tenengrad)
+        self.min_patch_laplacian = float(min_patch_laplacian)
 
-    def check(self, raw_gray_roi: np.ndarray, palm_span_px: float) -> Dict:
+    def check(
+        self,
+        raw_gray_roi: np.ndarray,
+        palm_span_px: float,
+        palm_breadth_px: Optional[float] = None,
+        is_edge_clipped: bool = False,
+    ) -> Dict:
         """
         Args:
             raw_gray_roi: un-enhanced grayscale ROI (CLAHE would mask glare).
             palm_span_px: estimated palm physical span from ROI extraction.
+            palm_breadth_px: measured MCP knuckle breadth in pixels.
+            is_edge_clipped: whether key palm landmarks are clipped at frame boundary.
 
         Returns:
             {"passed": bool, "reason": str|None, "metrics": dict, "message": str}
         """
         metrics = {
             "blur_var": None,
+            "tenengrad": None,
+            "patch_laplacian_q25": None,
             "glare_fraction": None,
             "mean_brightness": None,
             "palm_span": round(float(palm_span_px), 1),
+            "palm_breadth": round(float(palm_breadth_px), 1) if palm_breadth_px else None,
+            "distance_cm": None,
+            "distance_zone": "unknown",
         }
 
         if raw_gray_roi is None or raw_gray_roi.size == 0:
             return {"passed": False, "reason": "empty_roi", "metrics": metrics,
                     "message": "Empty ROI frame."}
 
+        if is_edge_clipped:
+            return {"passed": False, "reason": "edge_clipped", "metrics": metrics,
+                    "message": "Hand too close to edge — center palm in frame."}
+
         if palm_span_px < self.min_palm_span:
             return {"passed": False, "reason": "too_far",
                     "metrics": metrics,
                     "message": "Palm too far from camera — move closer."}
 
+        # Distance estimation
+        if palm_breadth_px is not None and palm_breadth_px > 0:
+            dist_cm, dist_zone, _ = estimate_palm_distance(palm_breadth_px)
+            metrics["distance_cm"] = dist_cm
+            metrics["distance_zone"] = dist_zone
+            if dist_zone == "too_close":
+                return {"passed": False, "reason": "too_close", "metrics": metrics,
+                        "message": "Palm too close — move palm slightly back."}
+
         gray = np.asarray(raw_gray_roi)
         mean_brightness = float(np.mean(gray))
         glare_fraction = float(np.mean(gray > 245))
-        blur_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+        # Sharpness evaluation
+        sharpness_passed, sharp_metrics, sharp_msg = evaluate_palm_sharpness(
+            gray,
+            min_tenengrad=self.min_tenengrad,
+            min_patch_laplacian=self.min_patch_laplacian,
+            fallback_blur_var=self.min_blur_var,
+        )
         metrics.update({
-            "blur_var": round(blur_var, 1),
+            "blur_var": sharp_metrics["blur_var"],
+            "tenengrad": sharp_metrics["tenengrad"],
+            "patch_laplacian_q25": sharp_metrics["patch_laplacian_q25"],
             "glare_fraction": round(glare_fraction, 4),
             "mean_brightness": round(mean_brightness, 1),
         })
@@ -139,9 +247,9 @@ class FrameQualityGate:
         if glare_fraction > self.max_glare_fraction:
             return {"passed": False, "reason": "glare", "metrics": metrics,
                     "message": "Glare detected — tilt palm slightly away from light."}
-        if blur_var < self.min_blur_var:
+        if not sharpness_passed:
             return {"passed": False, "reason": "blurry", "metrics": metrics,
-                    "message": "Image too blurry — hold palm steady."}
+                    "message": sharp_msg}
 
         return {"passed": True, "reason": None, "metrics": metrics,
                 "message": "Capture quality OK."}
@@ -283,6 +391,11 @@ class BiometricPipeline:
                 "model_name": self.model.get_model_name(),
                 "feature_dim": self.model.get_feature_dim(),
                 "latency_ms": 0.0,
+                "distance_cm": None,
+                "distance_zone": "unknown",
+                "palm_center": None,
+                "palm_breadth_px": 0.0,
+                "in_sweet_spot": False,
                 "preview_roi_bgr_b64": "",
                 "preview_enhanced_b64": "",
                 "preview_annotated_b64": "",
@@ -304,6 +417,11 @@ class BiometricPipeline:
                 "model_name": self.model.get_model_name(),
                 "feature_dim": self.model.get_feature_dim(),
                 "latency_ms": round(elapsed_ms, 2),
+                "distance_cm": None,
+                "distance_zone": "no_hand",
+                "palm_center": None,
+                "palm_breadth_px": 0.0,
+                "in_sweet_spot": False,
                 "preview_roi_bgr_b64": "",
                 "preview_enhanced_b64": "",
                 "preview_annotated_b64": "",
@@ -334,6 +452,11 @@ class BiometricPipeline:
                 "model_name": self.model.get_model_name(),
                 "feature_dim": self.model.get_feature_dim(),
                 "latency_ms": round(elapsed_ms, 2),
+                "distance_cm": None,
+                "distance_zone": "too_far",
+                "palm_center": roi_result.get("center"),
+                "palm_breadth_px": roi_result.get("palm_breadth_px", 0.0),
+                "in_sweet_spot": False,
                 "preview_roi_bgr_b64": "",
                 "preview_enhanced_b64": "",
                 "preview_annotated_b64": "",
@@ -355,6 +478,11 @@ class BiometricPipeline:
                 "model_name": self.model.get_model_name(),
                 "feature_dim": self.model.get_feature_dim(),
                 "latency_ms": round(elapsed_ms, 2),
+                "distance_cm": None,
+                "distance_zone": "unknown",
+                "palm_center": roi_result.get("center"),
+                "palm_breadth_px": roi_result.get("palm_breadth_px", 0.0),
+                "in_sweet_spot": False,
                 "preview_roi_bgr_b64": "",
                 "preview_enhanced_b64": "",
                 "preview_annotated_b64": "",
@@ -362,7 +490,12 @@ class BiometricPipeline:
             }
 
         # Stage 3.5: Capture Quality Gate — reject garbage frames before scoring.
-        quality = self.quality_gate.check(prep_result["gray"], roi_result.get("scale_px", 0.0))
+        quality = self.quality_gate.check(
+            prep_result["gray"],
+            palm_span_px=roi_result.get("scale_px", 0.0),
+            palm_breadth_px=roi_result.get("palm_breadth_px", 0.0),
+            is_edge_clipped=det_result.get("is_edge_clipped", False),
+        )
         if not quality["passed"]:
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             return {
@@ -376,6 +509,11 @@ class BiometricPipeline:
                 "model_name": self.model.get_model_name(),
                 "feature_dim": self.model.get_feature_dim(),
                 "latency_ms": round(elapsed_ms, 2),
+                "distance_cm": quality["metrics"].get("distance_cm"),
+                "distance_zone": quality["metrics"].get("distance_zone", "unknown"),
+                "palm_center": roi_result.get("center", (0, 0)),
+                "palm_breadth_px": roi_result.get("palm_breadth_px", 0.0),
+                "in_sweet_spot": False,
                 "preview_roi_bgr_b64": "",
                 "preview_enhanced_b64": "",
                 "preview_annotated_b64": "",
@@ -442,6 +580,11 @@ class BiometricPipeline:
             "model_name": self.model.get_model_name(),
             "feature_dim": self.model.get_feature_dim(),
             "latency_ms": round(elapsed_ms, 2),
+            "distance_cm": quality["metrics"].get("distance_cm"),
+            "distance_zone": quality["metrics"].get("distance_zone", "optimal"),
+            "palm_center": roi_result.get("center", (0, 0)),
+            "palm_breadth_px": roi_result.get("palm_breadth_px", 0.0),
+            "in_sweet_spot": bool(quality["metrics"].get("distance_zone") == "optimal"),
             "quality_reason": None,
             "quality_metrics": quality["metrics"],
             "finger_mask_applied": bool(finger_mask_info.get("applied")),
