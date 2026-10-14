@@ -73,6 +73,21 @@
             <img id="roi-thumb" class="roi-preview-thumb" alt="Palm ROI" style="display:none;">
         </div>
 
+        <!-- Live Distance Coaching Meter -->
+        <div id="distance-meter-container" class="distance-meter-container" style="display: none; margin-top: 10px;">
+            <div class="distance-header">
+                <span class="distance-title">Distance Coaching</span>
+                <span id="distance-val-text" class="distance-val-text">-- cm</span>
+            </div>
+            <div class="distance-track">
+                <div class="distance-zone-label left">Too Close</div>
+                <div class="distance-sweetspot-zone"></div>
+                <div class="distance-zone-label right">Too Far</div>
+                <div id="distance-needle" class="distance-needle"></div>
+            </div>
+            <div id="distance-status-text" class="distance-status-text">Position palm in front of camera (20–33 cm)</div>
+        </div>
+
         <div style="display:flex;align-items:center;gap:14px;margin-top:14px;">
             <div style="flex:1;">
                 <div class="t-xs dim" style="margin-bottom:5px;">Biometric score</div>

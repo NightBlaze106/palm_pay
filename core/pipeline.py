@@ -218,6 +218,9 @@ class FrameQualityGate:
             if dist_zone == "too_close":
                 return {"passed": False, "reason": "too_close", "metrics": metrics,
                         "message": "Palm too close — move palm slightly back."}
+            elif dist_zone == "too_far":
+                return {"passed": False, "reason": "too_far", "metrics": metrics,
+                        "message": "Palm too far from camera — move closer into sweet spot (20–33 cm)."}
 
         gray = np.asarray(raw_gray_roi)
         mean_brightness = float(np.mean(gray))

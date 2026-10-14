@@ -36,6 +36,10 @@ document.addEventListener('DOMContentLoaded', () => {
         scoreText: document.getElementById('score-text'),
         roiThumb: document.getElementById('roi-thumb'),
         resultPanel: document.getElementById('result-panel'),
+        distContainer: document.getElementById('distance-meter-container'),
+        distVal: document.getElementById('distance-val-text'),
+        distNeedle: document.getElementById('distance-needle'),
+        distStatus: document.getElementById('distance-status-text'),
     };
 
     // ---- State ----
@@ -45,6 +49,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let probeBusy = false;
     let processing = false;
     let resumeTimer = null;
+    let sweetSpotDwellStart = 0;
 
     const PROBE_INTERVAL_MS = 650;
     const RETRY_COOLDOWN_MS = 1500;
@@ -81,6 +86,35 @@ document.addEventListener('DOMContentLoaded', () => {
         setInstruction('Camera starts automatically when payment begins');
         hideRoiThumb();
         resetScoreBar();
+        updateDistanceMeter(null);
+    }
+
+    function updateDistanceMeter(data) {
+        if (!el.distContainer || !el.distVal || !el.distNeedle || !el.distStatus) return;
+        if (!data || !data.hand_detected || data.distance_cm === null || data.distance_cm === undefined) {
+            el.distVal.textContent = '-- cm';
+            el.distNeedle.style.left = '50%';
+            el.distNeedle.className = 'distance-needle';
+            el.distStatus.textContent = 'Position palm in front of camera (20–33 cm)';
+            return;
+        }
+        const dist = Number(data.distance_cm);
+        el.distVal.textContent = `${dist.toFixed(1)} cm`;
+        // Scale 10cm (left = 0%) to 45cm (right = 100%)
+        const clamped = Math.max(10, Math.min(45, dist));
+        const pct = ((clamped - 10) / (45 - 10)) * 100;
+        el.distNeedle.style.left = `${pct.toFixed(1)}%`;
+
+        if (data.distance_zone === 'optimal' || data.in_sweet_spot) {
+            el.distNeedle.className = 'distance-needle optimal';
+            el.distStatus.textContent = '🎯 Ideal distance (20–33 cm) — hold steady';
+        } else if (data.distance_zone === 'too_close') {
+            el.distNeedle.className = 'distance-needle danger';
+            el.distStatus.textContent = '⚠️ Too close — move palm slightly back';
+        } else {
+            el.distNeedle.className = 'distance-needle warning';
+            el.distStatus.textContent = '⚠️ Too far — move palm closer to camera';
+        }
     }
 
     function setDetectStatus(text, found) {
@@ -141,6 +175,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         resetScoreBar();
         hideRoiThumb();
+        sweetSpotDwellStart = 0;
+        updateDistanceMeter(null);
+        if (el.distContainer) el.distContainer.style.display = 'block';
+
         setDetectStatus('CAMERA STARTING…', false);
         setInstruction('Waiting for customer — place palm in frame');
         setStatusLine('<span class="pulse-dot"></span> Starting camera…');
@@ -160,6 +198,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function endSaleToIdle() {
         mode = 'idle';
         sale = null;
+        sweetSpotDwellStart = 0;
         stopProbing();
         clearTimers();
         stopCamera();  // sale over → camera off
@@ -172,6 +211,7 @@ document.addEventListener('DOMContentLoaded', () => {
         validateAmount();
         el.resultPanel.style.display = 'none';
 
+        if (el.distContainer) el.distContainer.style.display = 'none';
         setIdleCameraUi();
         setStatusLine('<span class="pulse-dot"></span> No active sale');
     }
@@ -194,7 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!camera.isActive || probeBusy || processing || mode !== 'sale') return;
         probeBusy = true;
         try {
-            const frameB64 = camera.captureFrameAsBase64(0.7);
+            const frameB64 = camera.captureFrameAsBase64(0.85);
             if (!frameB64) return;
             const resp = await fetch('/api/process_frame', {
                 method: 'POST',
@@ -204,13 +244,47 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await resp.json();
             if (!(mode === 'sale')) return;
 
-            if (data.success && data.hand_detected && data.roi_extracted) {
-                setDetectStatus('PALM FOUND', true);
-                showRoiThumb(data.preview_roi_b64);
-                camera.drawPolygon(data.roi_polygon, '#10b981', 3);
-                attemptPayment();
+            updateDistanceMeter(data);
+
+            const inSweetSpot = Boolean(data.success && data.hand_detected && data.roi_extracted && data.in_sweet_spot);
+
+            if (data.hand_detected) {
+                if (inSweetSpot) {
+                    const now = Date.now();
+                    if (!sweetSpotDwellStart) {
+                        sweetSpotDwellStart = now;
+                    }
+                    const dwellMs = now - sweetSpotDwellStart;
+                    setDetectStatus('SWEET SPOT LOCKED', true);
+                    setInstruction(`Ideal distance (${data.distance_cm} cm) 🎯 — hold steady…`);
+                    showRoiThumb(data.preview_roi_b64);
+                    camera.drawPolygon(data.roi_polygon || [], '#10b981', 3);
+
+                    // Strictly gated: require hand to settle in sweet spot for >= 250ms
+                    if (dwellMs >= 250) {
+                        attemptPayment();
+                    }
+                } else {
+                    sweetSpotDwellStart = 0;
+                    showRoiThumb(data.preview_roi_b64);
+                    if (data.distance_zone === 'too_close') {
+                        setDetectStatus('TOO CLOSE', false);
+                        setInstruction(`⚠️ Too close (${data.distance_cm} cm) — move palm back into sweet spot`);
+                        camera.drawPolygon(data.roi_polygon || [], '#ef4444', 2);
+                    } else if (data.distance_zone === 'too_far') {
+                        setDetectStatus('TOO FAR', false);
+                        setInstruction(`⚠️ Too far (${data.distance_cm} cm) — move palm closer into sweet spot`);
+                        camera.drawPolygon(data.roi_polygon || [], '#f59e0b', 2);
+                    } else {
+                        setDetectStatus('ADJUST PALM', false);
+                        setInstruction(data.message || 'Position palm flat in sweet spot (20–33 cm)');
+                        camera.drawPolygon(data.roi_polygon || [], '#38bdf8', 2);
+                    }
+                }
             } else {
+                sweetSpotDwellStart = 0;
                 setDetectStatus('WAITING FOR CUSTOMER', false);
+                setInstruction('Place palm in frame (20–33 cm)');
                 camera.clearCanvas();
                 hideRoiThumb();
             }
@@ -308,6 +382,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function scheduleRetry() {
         // Stay in this sale; rescan automatically after a short cooldown.
+        sweetSpotDwellStart = 0;
         setDetectStatus('NOT RECOGNIZED', false);
         setInstruction('Try again — place palm in frame');
         setStatusLine('<span class="pulse-dot warn"></span> Palm not recognized — try again');
@@ -325,10 +400,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // ================= RESULTS =================
     function finishSale(kind, info) {
         mode = 'result';
+        sweetSpotDwellStart = 0;
         stopProbing();
         clearTimers();
         stopCamera();  // sale concluded (success or declined) → camera off
         hideRoiThumb();
+        if (el.distContainer) el.distContainer.style.display = 'none';
+        updateDistanceMeter(null);
 
         if (kind === 'success') {
             const d = info.pay;

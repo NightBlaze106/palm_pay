@@ -173,11 +173,17 @@ class PalmMatcher:
 
             geo_distance = None
             geo_pass = True
+            geo_limit_used = getattr(config, "GEO_MAX_DIST", 2.40)
             if query_geo is not None:
                 ref_mean, ref_std = self.user_geometry_stats(user)
                 if ref_mean is not None:
                     geo_distance = geometry_distance(query_geo, ref_mean, ref_std)
-                    geo_pass = geo_distance <= config.GEO_MAX_DIST
+                    high_conf_thresh = getattr(config, "GEO_HIGH_CONF_TEXTURE", 0.76)
+                    if mean_score >= high_conf_thresh:
+                        geo_limit_used = getattr(config, "GEO_HIGH_CONF_MAX_DIST", 3.20)
+                    else:
+                        geo_limit_used = getattr(config, "GEO_MAX_DIST", 2.40)
+                    geo_pass = geo_distance <= geo_limit_used
                 # Candidate without geometry data -> legacy texture-only path.
 
             thresh = self.active_threshold
@@ -191,6 +197,7 @@ class PalmMatcher:
                     "score": round(mean_score, 4),
                     "best_sample_score": round(best_sample, 4),
                     "geo_distance": round(geo_distance, 3) if geo_distance is not None else None,
+                    "geo_limit": round(geo_limit_used, 2) if geo_distance is not None else None,
                     "_texture_passes": texture_passes,
                     "_geo_passes": geo_pass,
                     "_passes": texture_passes and geo_pass,
@@ -227,6 +234,7 @@ class PalmMatcher:
         if not top["_passes"]:
             # Distinguish the failing signal so the UI can tell the truth.
             if top["_texture_passes"] and not top["_geo_passes"]:
+                limit_val = top.get("geo_limit", getattr(config, "GEO_MAX_DIST", 2.40))
                 return {
                     "recognized": False,
                     "matched_user": None,
@@ -234,12 +242,12 @@ class PalmMatcher:
                     "similarity_score": round(max(top["score"], 0.0), 4),
                     "threshold_used": thresh,
                     "geo_distance": top["geo_distance"],
-                    "geo_threshold": config.GEO_MAX_DIST,
+                    "geo_threshold": limit_val,
                     "all_scores": all_scores,
                     "reason": "geometry_mismatch",
                     "message": (
                         f"Hand shape does not match {top['name']} "
-                        f"(geometry distance {top['geo_distance']} > limit {config.GEO_MAX_DIST})."
+                        f"(geometry distance {top['geo_distance']} > limit {limit_val})."
                     ),
                 }
             reason_str = "deep_below_threshold" if getattr(config, "DEEP_ENABLED", False) else "below_threshold"
@@ -253,6 +261,7 @@ class PalmMatcher:
                     f"Palm Not Recognized (Best Match: {top['name']} with Score: "
                     f"{top['score']:.4f} < Threshold: {thresh:.2f})"
                 )
+            limit_val = top.get("geo_limit", getattr(config, "GEO_MAX_DIST", 2.40))
             return {
                 "recognized": False,
                 "matched_user": None,
@@ -260,7 +269,7 @@ class PalmMatcher:
                 "similarity_score": round(max(top["score"], 0.0), 4),
                 "threshold_used": thresh,
                 "geo_distance": top["geo_distance"],
-                "geo_threshold": config.GEO_MAX_DIST if query_geo is not None else None,
+                "geo_threshold": limit_val if query_geo is not None else None,
                 "all_scores": all_scores,
                 "reason": reason_str,
                 "message": fail_msg,
@@ -274,6 +283,7 @@ class PalmMatcher:
             if gap < config.MATCHER_AMBIGUITY_MARGIN:
                 ambiguous = True
 
+        limit_val = top.get("geo_limit", getattr(config, "GEO_MAX_DIST", 2.40))
         if ambiguous:
             return {
                 "recognized": False,
@@ -282,7 +292,7 @@ class PalmMatcher:
                 "similarity_score": round(max(top["score"], 0.0), 4),
                 "threshold_used": thresh,
                 "geo_distance": top["geo_distance"],
-                "geo_threshold": config.GEO_MAX_DIST if query_geo is not None else None,
+                "geo_threshold": limit_val if query_geo is not None else None,
                 "all_scores": all_scores,
                 "reason": "ambiguous",
                 "message": (
@@ -298,7 +308,7 @@ class PalmMatcher:
             "similarity_score": round(max(top["score"], 0.0), 4),
             "threshold_used": thresh,
             "geo_distance": top["geo_distance"],
-            "geo_threshold": config.GEO_MAX_DIST if query_geo is not None else None,
+            "geo_threshold": limit_val if query_geo is not None else None,
             "all_scores": all_scores,
             "reason": "ok",
             "message": (
